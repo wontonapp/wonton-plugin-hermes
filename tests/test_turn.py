@@ -223,6 +223,30 @@ class OutboxCase(unittest.IsolatedAsyncioTestCase):
             await turn._do_outbox({"id": "o-4", "kind": {"type": "message", "recipient": "mom", "body": "hi"}})
         self.assertEqual(self.receipts, [("o-4", {"result": "sent", "event_id": "$sent"})])
 
+    async def test_receipt_failure_does_not_kill_the_loop(self):
+        polls = 0
+
+        async def poll(client=None):
+            nonlocal polls
+            polls += 1
+            if polls == 1:
+                return {"id": "o-7", "kind": {"type": "bogus"}}
+            await asyncio.sleep(0.01)
+            return None
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        with mock.patch.object(turn, "_poll_outbox", poll), \
+                mock.patch.object(turn, "_do_outbox", boom), \
+                mock.patch.object(turn, "_receipt", boom):
+            task = asyncio.create_task(turn._outbox_loop())
+            await asyncio.sleep(0.05)
+            self.assertFalse(task.done())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
     async def test_send_timeout_is_other(self):
         client = mock.AsyncMock()
         client.get_account_data.return_value = {"@mom:example.org": [ROOM]}

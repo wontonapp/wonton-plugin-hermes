@@ -297,7 +297,10 @@ async def _outbox_loop():
                 await _do_outbox(item, client)
             except Exception as exc:
                 logger.warning("执行出箱项失败 %r：%r", item.get("id"), exc)
-                await _receipt(item.get("id"), {"result": "failed", "category": "other"}, client)
+                try:
+                    await _receipt(item.get("id"), {"result": "failed", "category": "other"}, client)
+                except Exception as receipt_exc:
+                    logger.warning("回报出箱失败 %r：%r", item.get("id"), receipt_exc)
 
 
 async def _poll_outbox(client=None):
