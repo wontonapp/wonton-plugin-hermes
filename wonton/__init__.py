@@ -122,6 +122,8 @@ def register(ctx):
     ctx.register_hook("pre_llm_call", send_files_context)
     from . import message_batch
     from . import side_chat
+    from . import turn
 
+    turn.register(ctx)
     side_chat.register(ctx)
     message_batch.register(ctx)
