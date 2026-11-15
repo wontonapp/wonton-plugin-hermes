@@ -105,7 +105,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.store = Store()
         self.server = Server()
-        turn._S.update({"loop": None, "runner": None, "session_store": None, "origins": {}, "tokens": {}, "worker": True})
+        turn._S.update({"loop": None, "runner": None, "session_store": None, "origins": {}, "pending": {}, "tokens": {}, "worker": True})
         turn._install_headers()
         self.vars = mock.patch.dict("os.environ", {
             "WONTON_MCP_URL": "http://core:8080/mcp/bus-token",
@@ -142,7 +142,9 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_end_clears_the_turn(self):
         await self.turn()
+        turn._S["pending"]["key:!dm1:example.org"] = {"sender": OWNER}
         turn.on_session_end(session_id=SID)
+        self.assertNotIn("key:!dm1:example.org", turn._S["pending"])
         await handlers._call_tool_racing_stdio_death(
             self.server, "x", {})
         self.assertNotIn("wonton-session", self.server.session._resolve_param_headers("x", {}))
@@ -169,7 +171,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
 
 class OutboxCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        turn._S.update({"origins": {SID: {"session_key": "key:dm"}}, "runner": None})
+        turn._S.update({"origins": {SID: {"session_key": "key:!dm1:example.org"}}, "runner": None})
         self.receipts = []
 
     async def test_cancel_turn_interrupts_the_session(self):
@@ -221,6 +223,17 @@ class OutboxCase(unittest.IsolatedAsyncioTestCase):
             await turn._do_outbox({"id": "o-4", "kind": {"type": "message", "recipient": "mom", "body": "hi"}})
         self.assertEqual(self.receipts, [("o-4", {"result": "sent", "event_id": "$sent"})])
 
+    async def test_send_timeout_is_other(self):
+        client = mock.AsyncMock()
+        client.get_account_data.return_value = {"@mom:example.org": [ROOM]}
+        client.get_joined_rooms.return_value = [ROOM]
+        client.send_message_event.side_effect = asyncio.TimeoutError()
+        with mock.patch.object(turn, "_client", lambda: client), \
+                mock.patch.dict("os.environ", {"MATRIX_USER_ID": "@bot:example.org", "MATRIX_HOMESERVER": ""}), \
+                mock.patch.object(turn, "_receipt", self._receipt):
+            await turn._do_outbox({"id": "o-6", "kind": {"type": "message", "recipient": "mom", "body": "hi"}})
+        self.assertEqual(self.receipts, [("o-6", {"result": "failed", "category": "other"})])
+
     async def test_account_data_error_is_not_an_empty_dm(self):
         client = mock.AsyncMock()
         client.get_account_data.side_effect = RuntimeError("boom")
@@ -230,7 +243,7 @@ class OutboxCase(unittest.IsolatedAsyncioTestCase):
             await turn._do_outbox({"id": "o-5", "kind": {"type": "message", "recipient": "mom", "body": "hi"}})
         self.assertEqual(self.receipts, [("o-5", {"result": "failed", "category": "other"})])
 
-    async def _receipt(self, item_id, result):
+    async def _receipt(self, item_id, result, client=None):
         self.receipts.append((item_id, result))
 
 

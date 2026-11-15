@@ -14,6 +14,7 @@ ID，核心重发同一条不会发两遍。
 """
 
 import asyncio
+import concurrent.futures
 import contextvars
 import logging
 import os
@@ -30,6 +31,8 @@ ORIGIN = "app.wonton/origin"
 
 # 工具处理器在别的线程跑，提交时上游会复制 contextvars，所以钩子在这里 set 的值处理器看得到。
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
+# 报链在后台单线程顺序发：钩子跑在网关事件循环里，同步请求会把所有会话卡住；单线程保证 start 先于 end。
+_CHAIN_POSTS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="wonton-chain")
 
 _S = {
     "loop": None,
@@ -39,6 +42,7 @@ _S = {
     "pending": {},   # 会话键 -> 同上，会话 id 这时还没有
     "tokens": {},    # 会话 id -> contextvar 的 reset 凭据
     "worker": False,
+    "warned": False,
 }
 
 
@@ -172,9 +176,7 @@ def pre_llm_call(session_id="", sender_id="", **_):
     }
     if origin.get("thread"):
         body["thread"] = origin["thread"]
-    chain = _post_chain(body)
-    if chain:
-        current["chain"] = chain
+    _post_chain(body)
     origin["fresh"] = False
     return None
 
@@ -187,37 +189,27 @@ def on_session_end(session_id="", interrupted=False, **_):
             _CURRENT.reset(token)
         except ValueError:
             _CURRENT.set(None)
-    _S["origins"].pop(session_id, None)
-    _post_chain({"phase": "end", "session": session_id}, background=True)
+    origin = _S["origins"].pop(session_id, None) or {}
+    _S["pending"].pop(origin.get("session_key"), None)
+    _post_chain({"phase": "end", "session": session_id})
 
 
-def _post_chain(body, background=False):
-    """POST 一轮的开始/结束；失败只记日志，不挡对话。开始返回链 ID。"""
+def _post_chain(body):
+    """排队 POST 一轮的开始/结束；失败只记日志，不挡对话。"""
     core, token = _core()
     bot = _bot_token()
     if not core or not token or not bot:
-        return None
+        return
     url = f"{core}/mcp/{token}/agent/chains"
-    if background:
-        loop = _S["loop"]
-        if loop is None or loop.is_closed():
-            return None
-        asyncio.run_coroutine_threadsafe(asyncio.to_thread(_chain_request, url, body, bot), loop)
-        return None
-    try:
-        response = httpx.post(url, json=body, headers={BOT_TOKEN: bot}, timeout=5, trust_env=False)
-        response.raise_for_status()
-        return response.json().get("chain")
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("报调用链失败 %r：%r", body.get("phase"), exc)
-        return None
+    _CHAIN_POSTS.submit(_chain_request, url, body, bot)
 
 
 def _chain_request(url, body, bot):
     try:
-        httpx.post(url, json=body, headers={BOT_TOKEN: bot}, timeout=5, trust_env=False)
-    except httpx.HTTPError as exc:
-        logger.warning("报调用链结束失败：%r", exc)
+        response = httpx.post(url, json=body, headers={BOT_TOKEN: bot}, timeout=5, trust_env=False)
+        response.raise_for_status()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("报调用链 %s 失败：%r", body.get("phase"), exc)
 
 
 def _install_headers():
@@ -230,7 +222,13 @@ def _install_headers():
     except Exception as exc:
         logger.debug("包 MCP 工具处理器失败：%r", exc)
         return
-    original = mcp_tool_handlers._call_tool_racing_stdio_death
+    try:
+        original = mcp_tool_handlers._call_tool_racing_stdio_death
+    except AttributeError as exc:
+        if not _S["warned"]:
+            _S["warned"] = True
+            logger.warning("上游没有 MCP 工具处理器 hook 点，身份头不会带上：%r", exc)
+        return
     if getattr(original, "_wonton_turn", False):
         return
 
@@ -280,47 +278,55 @@ def _start_worker():
 
 
 async def _outbox_loop():
-    while True:
-        try:
-            item = await _poll_outbox()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("取出箱失败：%r", exc)
-            await asyncio.sleep(1)
-            continue
-        if item is None:
-            continue
-        try:
-            await _do_outbox(item)
-        except Exception as exc:
-            logger.warning("执行出箱项失败 %r：%r", item.get("id"), exc)
-            await _receipt(item.get("id"), {"result": "failed", "category": "other"})
+    delay = 1
+    async with httpx.AsyncClient(timeout=40, trust_env=False) as client:
+        while True:
+            try:
+                item = await _poll_outbox(client)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("取出箱失败：%r", exc)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+                continue
+            delay = 1
+            if item is None:
+                continue
+            try:
+                await _do_outbox(item, client)
+            except Exception as exc:
+                logger.warning("执行出箱项失败 %r：%r", item.get("id"), exc)
+                await _receipt(item.get("id"), {"result": "failed", "category": "other"}, client)
 
 
-async def _poll_outbox():
+async def _poll_outbox(client=None):
     core, token = _core()
     bot = _bot_token()
     if not core or not token or not bot:
         await asyncio.sleep(5)
         return None
-    async with httpx.AsyncClient(timeout=40, trust_env=False) as client:
-        response = await client.get(f"{core}/mcp/{token}/agent/outbox", headers={BOT_TOKEN: bot})
-        response.raise_for_status()
-        return response.json()
+    if client is None:
+        async with httpx.AsyncClient(timeout=40, trust_env=False) as own:
+            return await _poll_outbox(own)
+    response = await client.get(f"{core}/mcp/{token}/agent/outbox", headers={BOT_TOKEN: bot})
+    response.raise_for_status()
+    return response.json()
 
 
-async def _receipt(item_id, result):
+async def _receipt(item_id, result, client=None):
     core, token = _core()
     bot = _bot_token()
     if not core or not token or not bot or not item_id:
         return
-    async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
-        await client.post(f"{core}/mcp/{token}/agent/outbox",
-                          json={"id": item_id, "result": result}, headers={BOT_TOKEN: bot})
+    if client is None:
+        async with httpx.AsyncClient(timeout=5, trust_env=False) as own:
+            return await _receipt(item_id, result, own)
+    await client.post(f"{core}/mcp/{token}/agent/outbox", timeout=5,
+                      json={"id": item_id, "result": result}, headers={BOT_TOKEN: bot})
 
 
-async def _do_outbox(item):
+async def _do_outbox(item, client=None):
     item_id = item.get("id")
     kind = item.get("kind") or {}
     if kind.get("type") == "cancel_turn":
@@ -334,19 +340,19 @@ async def _do_outbox(item):
                 interrupt_reason="云吞停链",
                 invalidation_reason="wonton_chain_stopped",
             )
-            await _receipt(item_id, {"result": "sent", "event_id": ""})
+            await _receipt(item_id, {"result": "sent", "event_id": ""}, client)
         else:
-            await _receipt(item_id, {"result": "failed", "category": "other"})
+            await _receipt(item_id, {"result": "failed", "category": "other"}, client)
     elif kind.get("type") == "message":
         event_id, category = await _send(
             kind.get("recipient") or "", kind.get("body") or "", item_id
         )
         if event_id is None:
-            await _receipt(item_id, {"result": "failed", "category": category})
+            await _receipt(item_id, {"result": "failed", "category": category}, client)
         else:
-            await _receipt(item_id, {"result": "sent", "event_id": event_id})
+            await _receipt(item_id, {"result": "sent", "event_id": event_id}, client)
     else:
-        await _receipt(item_id, {"result": "failed", "category": "other"})
+        await _receipt(item_id, {"result": "failed", "category": "other"}, client)
 
 
 def _server():
@@ -381,9 +387,9 @@ async def _send(recipient, body, txn_id):
             from mautrix.types import EventType
 
             try:
-                event_id = await client.send_message_event(
+                event_id = await asyncio.wait_for(client.send_message_event(
                     room, EventType.ROOM_MESSAGE,
-                    {"msgtype": "m.text", "body": body}, txn_id=txn_id)
+                    {"msgtype": "m.text", "body": body}, txn_id=txn_id), timeout=45)
             except Exception as exc:
                 logger.warning("发私聊失败：%r", exc)
                 return None, "other"
