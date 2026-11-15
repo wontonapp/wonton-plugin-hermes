@@ -17,6 +17,7 @@ import asyncio
 import contextvars
 import logging
 import os
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -333,39 +334,61 @@ async def _do_outbox(item):
                 interrupt_reason="云吞停链",
                 invalidation_reason="wonton_chain_stopped",
             )
-        await _receipt(item_id, {"result": "sent", "event_id": ""})
+            await _receipt(item_id, {"result": "sent", "event_id": ""})
+        else:
+            await _receipt(item_id, {"result": "failed", "category": "other"})
     elif kind.get("type") == "message":
-        event_id = await _send(kind.get("recipient") or "", kind.get("body") or "", item_id)
+        event_id, category = await _send(
+            kind.get("recipient") or "", kind.get("body") or "", item_id
+        )
         if event_id is None:
-            await _receipt(item_id, {"result": "failed", "category": "no_room"})
+            await _receipt(item_id, {"result": "failed", "category": category})
         else:
             await _receipt(item_id, {"result": "sent", "event_id": event_id})
     else:
         await _receipt(item_id, {"result": "failed", "category": "other"})
 
 
+def _server():
+    """收件人的服务器：优先 ``MATRIX_HOMESERVER`` 的主机名，取不到再认 Bot 的 MXID。"""
+    homeserver = os.environ.get("MATRIX_HOMESERVER", "")
+    if homeserver:
+        host = urlsplit(homeserver).hostname
+        if host:
+            return host
+    return os.environ.get("MATRIX_USER_ID", "").partition(":")[2]
+
+
 async def _send(recipient, body, txn_id):
-    """以 Bot 的身份发进和收件人的私聊；没有可用私聊发不成时 None。"""
+    """以 Bot 的身份发进和收件人的私聊。
+
+    返回 ``(event_id, category)``；没发成时 event_id 为 None，category 是 ``no_room``（没有已加入的私聊）
+    或 ``other``（读账号数据、发送本身失败）。
+    """
     client = _client()
-    user = os.environ.get("MATRIX_USER_ID", "")
-    _, _, server = user.partition(":")
+    server = _server()
     if client is None or not server or not recipient:
-        return None
+        return None, "other"
     target = f"@{recipient}:{server}"
     try:
         direct = await client.get_account_data("m.direct") or {}
         joined = set(await client.get_joined_rooms() or [])
     except Exception as exc:
         logger.warning("读私聊房间失败：%r", exc)
-        return None
+        return None, "other"
     for room in direct.get(target, []):
         if room in joined:
             from mautrix.types import EventType
 
-            return await client.send_message_event(
-                room, EventType.ROOM_MESSAGE,
-                {"msgtype": "m.text", "body": body}, txn_id=txn_id)
-    return None
+            try:
+                event_id = await client.send_message_event(
+                    room, EventType.ROOM_MESSAGE,
+                    {"msgtype": "m.text", "body": body}, txn_id=txn_id)
+            except Exception as exc:
+                logger.warning("发私聊失败：%r", exc)
+                return None, "other"
+            return event_id, ""
+    return None, "no_room"
 
 
 def _client():

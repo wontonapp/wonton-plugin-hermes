@@ -180,13 +180,19 @@ class OutboxCase(unittest.IsolatedAsyncioTestCase):
         runner._interrupt_running_turn.assert_called_once()
         self.assertEqual(self.receipts, [("o-1", {"result": "sent", "event_id": ""})])
 
+    async def test_cancel_unknown_session_fails(self):
+        turn._S["runner"] = mock.Mock()
+        with mock.patch.object(turn, "_receipt", self._receipt):
+            await turn._do_outbox({"id": "o-0", "kind": {"type": "cancel_turn", "session": "gone"}})
+        self.assertEqual(self.receipts, [("o-0", {"result": "failed", "category": "other"})])
+
     async def test_message_goes_to_the_joined_dm_with_item_id(self):
         client = mock.AsyncMock()
         client.get_account_data.return_value = {"@mom:example.org": [ROOM]}
         client.get_joined_rooms.return_value = [ROOM]
         client.send_message_event.return_value = "$sent"
         with mock.patch.object(turn, "_client", lambda: client), \
-                mock.patch.dict("os.environ", {"MATRIX_USER_ID": "@bot:example.org"}), \
+                mock.patch.dict("os.environ", {"MATRIX_USER_ID": "@bot:example.org", "MATRIX_HOMESERVER": ""}), \
                 mock.patch.object(turn, "_receipt", self._receipt):
             await turn._do_outbox({"id": "o-2", "kind": {"type": "message", "recipient": "mom", "body": "hi"}})
         self.assertEqual(self.receipts, [("o-2", {"result": "sent", "event_id": "$sent"})])
@@ -197,10 +203,32 @@ class OutboxCase(unittest.IsolatedAsyncioTestCase):
         client.get_account_data.return_value = {}
         client.get_joined_rooms.return_value = []
         with mock.patch.object(turn, "_client", lambda: client), \
-                mock.patch.dict("os.environ", {"MATRIX_USER_ID": "@bot:example.org"}), \
+                mock.patch.dict("os.environ", {"MATRIX_USER_ID": "@bot:example.org", "MATRIX_HOMESERVER": ""}), \
                 mock.patch.object(turn, "_receipt", self._receipt):
             await turn._do_outbox({"id": "o-3", "kind": {"type": "message", "recipient": "mom", "body": "hi"}})
         self.assertEqual(self.receipts, [("o-3", {"result": "failed", "category": "no_room"})])
+
+    async def test_message_uses_the_homeserver_host(self):
+        client = mock.AsyncMock()
+        client.get_account_data.return_value = {"@mom:https.example.org": [ROOM]}
+        client.get_joined_rooms.return_value = [ROOM]
+        client.send_message_event.return_value = "$sent"
+        with mock.patch.object(turn, "_client", lambda: client), \
+                mock.patch.dict("os.environ", {
+                    "MATRIX_USER_ID": "@bot:wrong.example.org",
+                    "MATRIX_HOMESERVER": "https://https.example.org/",
+                }), mock.patch.object(turn, "_receipt", self._receipt):
+            await turn._do_outbox({"id": "o-4", "kind": {"type": "message", "recipient": "mom", "body": "hi"}})
+        self.assertEqual(self.receipts, [("o-4", {"result": "sent", "event_id": "$sent"})])
+
+    async def test_account_data_error_is_not_an_empty_dm(self):
+        client = mock.AsyncMock()
+        client.get_account_data.side_effect = RuntimeError("boom")
+        with mock.patch.object(turn, "_client", lambda: client), \
+                mock.patch.dict("os.environ", {"MATRIX_USER_ID": "@bot:example.org", "MATRIX_HOMESERVER": ""}), \
+                mock.patch.object(turn, "_receipt", self._receipt):
+            await turn._do_outbox({"id": "o-5", "kind": {"type": "message", "recipient": "mom", "body": "hi"}})
+        self.assertEqual(self.receipts, [("o-5", {"result": "failed", "category": "other"})])
 
     async def _receipt(self, item_id, result):
         self.receipts.append((item_id, result))
