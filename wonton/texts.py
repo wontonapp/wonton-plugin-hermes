@@ -20,11 +20,12 @@ NO_MODELS = {
     "ja": "利用できるモデルがまだありません。アプリ → Models でモデルプロバイダーと API キーを追加してから、もう一度送ってください。",
 }
 
+# {model} 是网关注入的不透明模型 ID，原样回显即可；不解释它的前缀或网关内部的路由结构。
 NO_DEFAULT = {
-    "en": "The default model {model} has no usable model: check the routing group {group} in Apps → Models.",
-    "zh-Hans": "默认模型 {model} 里没有可用的模型：请在「应用 → 模型设置」里检查名为 {group} 的路由组。",
-    "zh-Hant": "預設模型 {model} 裡沒有可用的模型：請在「應用程式 → 模型设置」裡檢查名為 {group} 的路由群組。",
-    "ja": "既定のモデル {model} に使えるモデルがありません。アプリ → Models で、ルーティンググループ {group} を確認してください。",
+    "en": "The default model {model} isn't available: check or pick a model in Apps → Models, then message me again.",
+    "zh-Hans": "默认模型 {model} 不可用：请在「应用 → 模型设置」里检查或换一个模型，再给我发消息。",
+    "zh-Hant": "預設模型 {model} 不可用：請在「應用程式 → 模型设置」裡檢查或換一個模型，再傳訊息給我。",
+    "ja": "既定のモデル {model} は利用できません。アプリ → Models でモデルを確認するか、別のモデルを選んでから、もう一度送ってください。",
 }
 
 # 旁聊结果行的 body（旁聊约定的样例：旁聊「标题」：已完成）。state 用英文码进结构化字段，

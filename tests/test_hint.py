@@ -175,7 +175,8 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fake.calls, [])
 
     async def test_default_model_present_replies_nothing(self):
-        self.fake.models = ["group/wonton-default"]
+        os.environ["WONTON_MODEL_DEFAULT"] = "opaque:default"
+        self.fake.models = ["opaque:default"]
         self.assertIsNone(await self.hint())
         self.assertEqual(self.fake.calls, [])
 
@@ -184,13 +185,15 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.hint())
         self.assertEqual(self.fake.calls, [])
 
-    async def test_missing_default_names_the_group(self):
+    async def test_missing_default_prompts_without_route_explanation(self):
+        os.environ["WONTON_MODEL_DEFAULT"] = "opaque:default"
         self.fake.models = ["other"]
         self.fake.people[OWNER] = ["zh-Hans"]
         reply = (await self.hint())["reply"]
-        self.assertEqual(reply, texts.NO_DEFAULT["zh-Hans"].format(model="group/wonton-default", group="wonton-default"))
-        self.assertIn("名为 wonton-default", reply)
-        self.assertEqual(reply.count("group/"), 1)
+        self.assertIn("opaque:default", reply)  # 默认模型 ID 原样出现，不去前缀
+        self.assertIn("模型设置", reply)  # 指到模型设置入口
+        self.assertNotIn("路由", reply)  # 不解释网关内部路由
+        self.assertNotIn("group", reply)
 
     async def test_command_is_left_alone(self):
         self.assertIsNone(await self.hint(text=" /model"))

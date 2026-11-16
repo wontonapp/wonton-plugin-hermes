@@ -92,7 +92,7 @@ async def missing_model_hint(text="", source=None, **_):
         return None
     lang = await language(sender)
     if ids:
-        reply = NO_DEFAULT[lang].format(model=model, group=model.removeprefix("group/"))
+        reply = NO_DEFAULT[lang].format(model=model)
     else:
         reply = NO_MODELS[lang]
     return {"action": "handled", "reply": reply}
