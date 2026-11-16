@@ -149,6 +149,18 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
             self.server, "x", {})
         self.assertNotIn("wonton-session", self.server.session._resolve_param_headers("x", {}))
 
+    async def test_end_without_a_start_is_not_reported(self):
+        sent = []
+
+        def post(url, json=None, headers=None, **kwargs):
+            sent.append(json)
+
+        self.chain.stop()
+        with mock.patch.object(turn.httpx, "post", post):
+            turn.on_session_end(session_id="never-started")
+            await asyncio.sleep(0.05)
+        self.assertEqual(sent, [])
+
     async def test_chain_start_and_end_are_reported(self):
         sent = []
 
@@ -181,6 +193,14 @@ class OutboxCase(unittest.IsolatedAsyncioTestCase):
             await turn._do_outbox({"id": "o-1", "kind": {"type": "cancel_turn", "session": SID}})
         runner._interrupt_running_turn.assert_called_once()
         self.assertEqual(self.receipts, [("o-1", {"result": "sent", "event_id": ""})])
+
+    async def test_cancel_without_an_in_memory_origin_uses_the_session_store(self):
+        runner = mock.Mock()
+        turn._S.update({"runner": runner, "origins": {}, "session_store": Store()})
+        with mock.patch.object(turn, "_receipt", self._receipt):
+            await turn._do_outbox({"id": "o-9", "kind": {"type": "cancel_turn", "session": SID}})
+        runner._interrupt_running_turn.assert_called_once()
+        self.assertEqual(self.receipts, [("o-9", {"result": "sent", "event_id": ""})])
 
     async def test_cancel_unknown_session_fails(self):
         turn._S["runner"] = mock.Mock()

@@ -191,7 +191,8 @@ def on_session_end(session_id="", interrupted=False, **_):
             _CURRENT.set(None)
     origin = _S["origins"].pop(session_id, None) or {}
     _S["pending"].pop(origin.get("session_key"), None)
-    _post_chain({"phase": "end", "session": session_id})
+    if token is not None:
+        _post_chain({"phase": "end", "session": session_id})
 
 
 def _post_chain(body):
@@ -334,7 +335,7 @@ async def _do_outbox(item, client=None):
     kind = item.get("kind") or {}
     if kind.get("type") == "cancel_turn":
         session = kind.get("session") or ""
-        origin = _S["origins"].get(session) or {}
+        origin = _origin(session) or {}
         session_key = origin.get("session_key")
         runner = _runner()
         if session_key and runner is not None:
