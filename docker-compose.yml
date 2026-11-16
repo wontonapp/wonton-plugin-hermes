@@ -208,7 +208,7 @@ configs:
 x-wonton:
   spec: "0.12"
   id: com.nousresearch.hermes
-  version: 0.7.4
+  version: 0.7.5
   kind: agent
   title: { zh: AI 管家（Hermes）, en: All-Purpose Bot (Hermes) }
   description:
@@ -238,10 +238,10 @@ x-wonton:
 
       CN office-IM channels (Feishu, DingTalk, WeCom, QQ bot, personal WeChat) are enabled one by one in the plugin's settings: create a bot app on the platform's console, fill in the app ID and secret, and turn the switch on. These chats live only in that IM, not in the Wonton app's chat page; personal WeChat supports direct messages only and needs a one-time scan login from a terminal on the server (steps in the plugin README). Telegram is still configured in Hermes' native Channels page and uses Wonton's outbound proxy.
   release_notes:
-    zh: "默认从模型设置使用模型；连接未准备好时会提醒你检查，不再偷偷换别的服务。"
-    zh-Hant: "預設從模型設定使用模型；連線未準備好時會提醒你檢查，不再偷偷換別的服務。"
-    en: "Uses Models by default and asks you to check when the connection isn't ready, instead of silently switching services."
-    ja: "既定ではモデル設定を使い、接続の準備ができていないときは別のサービスに切り替えず確認を促します。"
+    zh: "默认模型不可用时的提示更明白：直接请你去「模型设置」检查或换一个模型，不再提网关内部的路由组。"
+    zh-Hant: "預設模型不可用時的提示更明白：直接請你去「模型設定」檢查或換一個模型，不再提閘道內部的路由群組。"
+    en: "Clearer hint when the default model isn't available: it now just asks you to check or pick a model in Models, without mentioning gateway routing."
+    ja: "既定のモデルが使えないときの案内が分かりやすくなりました。ゲートウェイ内部のルーティングには触れず、モデル設定で確認するか別のモデルを選ぶよう促します。"
   agent:
     protocol: matrix
   bot:
