@@ -41,7 +41,7 @@ _S = {
     "origins": {},   # 会话 id -> {sender, session_key, room, thread, event_id}
     "pending": {},   # 会话键 -> 同上，会话 id 这时还没有
     "tokens": {},    # 会话 id -> contextvar 的 reset 凭据
-    "worker": False,
+    "worker": None,
     "warned": False,
 }
 
@@ -271,11 +271,14 @@ def _patch_session(session):
 
 
 def _start_worker():
+    """起后台的出箱轮询；任务留在 ``_S`` 里，事件循环只对任务持弱引用。"""
     loop = _S["loop"]
-    if _S["worker"] or loop is None or loop.is_closed():
+    worker = _S["worker"]
+    if worker and (not hasattr(worker, "done") or not worker.done()):
         return
-    _S["worker"] = True
-    loop.create_task(_outbox_loop())
+    if loop is None or loop.is_closed():
+        return
+    _S["worker"] = loop.create_task(_outbox_loop())
 
 
 async def _outbox_loop():

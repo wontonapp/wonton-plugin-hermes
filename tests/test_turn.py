@@ -161,6 +161,18 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         self.assertEqual(sent, [])
 
+    async def test_the_outbox_worker_task_is_retained(self):
+        async def sleeper():
+            await asyncio.sleep(60)
+
+        turn._S.update({"loop": asyncio.get_running_loop(), "worker": None})
+        with mock.patch.object(turn, "_outbox_loop", sleeper):
+            turn._start_worker()
+            self.assertIsInstance(turn._S["worker"], asyncio.Task)
+            turn._S["worker"].cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await turn._S["worker"]
+
     async def test_chain_start_and_end_are_reported(self):
         sent = []
 
