@@ -54,6 +54,8 @@ services:
         target: /seed/wonton/side_chat.py
       - source: wonton_message_batch
         target: /seed/wonton/message_batch.py
+      - source: wonton_turn
+        target: /seed/wonton/turn.py
       - source: wonton_texts
         target: /seed/wonton/texts.py
       - source: wonton_locale
@@ -182,6 +184,8 @@ configs:
     file: ./wonton/side_chat.py
   wonton_message_batch:
     file: ./wonton/message_batch.py
+  wonton_turn:
+    file: ./wonton/turn.py
   wonton_texts:
     file: ./wonton/texts.py
   wonton_locale:
@@ -208,7 +212,7 @@ configs:
 x-wonton:
   spec: "0.12"
   id: com.nousresearch.hermes
-  version: 0.7.5
+  version: 0.7.6
   kind: agent
   title: { zh: AI 管家（Hermes）, en: All-Purpose Bot (Hermes) }
   description:
@@ -238,10 +242,10 @@ x-wonton:
 
       CN office-IM channels (Feishu, DingTalk, WeCom, QQ bot, personal WeChat) are enabled one by one in the plugin's settings: create a bot app on the platform's console, fill in the app ID and secret, and turn the switch on. These chats live only in that IM, not in the Wonton app's chat page; personal WeChat supports direct messages only and needs a one-time scan login from a terminal on the server (steps in the plugin README). Telegram is still configured in Hermes' native Channels page and uses Wonton's outbound proxy.
   release_notes:
-    zh: "默认模型不可用时的提示更明白：直接请你去「模型设置」检查或换一个模型，不再提网关内部的路由组。"
-    zh-Hant: "預設模型不可用時的提示更明白：直接請你去「模型設定」檢查或換一個模型，不再提閘道內部的路由群組。"
-    en: "Clearer hint when the default model isn't available: it now just asks you to check or pick a model in Models, without mentioning gateway routing."
-    ja: "既定のモデルが使えないときの案内が分かりやすくなりました。ゲートウェイ内部のルーティングには触れず、モデル設定で確認するか別のモデルを選ぶよう促します。"
+    zh: "每轮告诉核心是谁在说话、并把工具调用归到这一轮；App 里停链能真的打断，批准过的私聊由 Bot 发出。"
+    zh-Hant: "每輪告訴核心是誰在說話、並把工具呼叫歸到這一輪；App 裡停鏈能真的打斷，批准過的私聊由 Bot 發出。"
+    en: "Each turn tells the core who is speaking and ties tool calls to that turn; stopping from the app interrupts it, and approved direct messages are sent by the bot."
+    ja: "各ターンで発言者をコアに伝え、ツール呼び出しをそのターンに結び付けます。アプリからの停止で実際に中断し、承認済みの DM はボットが送ります。"
   agent:
     protocol: matrix
   bot:
