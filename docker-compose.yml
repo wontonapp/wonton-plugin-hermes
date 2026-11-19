@@ -54,6 +54,8 @@ services:
         target: /seed/wonton/side_chat.py
       - source: wonton_message_batch
         target: /seed/wonton/message_batch.py
+      - source: wonton_commands
+        target: /seed/wonton/commands.py
       - source: wonton_turn
         target: /seed/wonton/turn.py
       - source: wonton_texts
@@ -184,6 +186,8 @@ configs:
     file: ./wonton/side_chat.py
   wonton_message_batch:
     file: ./wonton/message_batch.py
+  wonton_commands:
+    file: ./wonton/commands.py
   wonton_turn:
     file: ./wonton/turn.py
   wonton_texts:
