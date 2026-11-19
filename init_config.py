@@ -15,6 +15,8 @@
 #    只认旧包写的 true，主人自己改过的不动。
 # 8) 国内 IM 渠道开关（飞书、钉钉、企业微信、QQ、个人微信，插件设置里每渠道一个）：开关关着在 config.yaml 写显式
 #    停用（优先于凭据），开关打开撤掉，启用与否由 Hermes 按凭据判定（见 apply 里的第 8 块）。
+# 9) 旧包的模型网关配置（model.provider: custom:magpie 和 providers.magpie）：插件不再申请 models，网关的地址和凭据
+#    不再注入，留着只会让每条消息报连不上。撤掉以后算“还没选模型”，wonton 插件提示主人在插件网页里设。
 # 注入值要在已有 Bot 重建时更新，所以在这里处理；其余默认值从包里的 config.yaml 取。
 # `hermes config set` 在这里用不了：它降权运行，而这时数据目录还属于 root。
 import os
@@ -144,6 +146,26 @@ def apply(config, seed) -> bool:
                 entry["enabled"] = False
                 changed = True
 
+    if _drop_gateway_model(config):
+        changed = True
+
+    return changed
+
+
+def _drop_gateway_model(config) -> bool:
+    """9) 撤掉旧包的模型网关配置（见文件头）。只认旧包写的取值，主人自己选的供应商不动。"""
+    changed = False
+    model = config.get("model")
+    if isinstance(model, dict) and str(model.get("provider") or "").strip() == "custom:magpie":
+        del config["model"]
+        changed = True
+    providers = config.get("providers")
+    gateway = providers.get("magpie") if isinstance(providers, dict) else None
+    if isinstance(gateway, dict) and gateway.get("api") == "${WONTON_MODEL_BASE_URL}":
+        del providers["magpie"]
+        if not providers:
+            del config["providers"]
+        changed = True
     return changed
 
 
