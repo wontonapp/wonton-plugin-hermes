@@ -17,10 +17,8 @@
 还没选模型（`config.yaml` 里没有 `model.default`）时，wonton 插件按说话人的语言回一句去插件网页设置，不把上游
 “去终端跑 `hermes model`”的报错发进聊天。key 无效、额度用完这类短报错经语言包改写成指向同一个网页的 Keys 或 Models 页。
 
-旧版本经模型网关（magpie）用模型；升级时 init 撤掉旧包写的 `model.provider: custom:magpie` 和 `providers.magpie`
-（地址仍是 `${WONTON_MODEL_BASE_URL}` 占位符的那条），之后算“还没选模型”。想继续用 magpie，可以把它当自定义的
-OpenAI 兼容服务商填进 Hermes，但插件没有 `models` 权限，经核心别名 `models.wonton.internal` 访问网关会被拒，只能
-用网关自己对外的地址。
+想用 magpie 这类模型网关，可以把它当自定义的 OpenAI 兼容服务商填进 Hermes；插件没有 `models` 权限，经核心别名
+`models.wonton.internal` 访问网关会被拒，只能用网关自己对外的地址。
 
 容器里的工具能读这个 Bot 的数据目录，也就能读到这里存的 key 和登录态（见下一节）。
 
