@@ -4,7 +4,25 @@
 权限。一个插件一个 Git 仓库，仓库根目录就是插件包，发布就是打 tag。主人在 App 里装上插件，核心按清单起容器、接好登录，
 插件的网页在 App 里作为小程序打开。
 
-这个仓库是 Hermes 插件：云吞的默认 Agent，以 Matrix bot 身份和主人对话，模型经模型网关。飞书、钉钉、企业微信、QQ、个人微信这些国内 IM 渠道在插件详情页的「设置」里逐个启用（见下面的「国内 IM 渠道」）；Telegram 在插件网页的原生 Channels 页填凭据和白名单。怎么写插件、怎么用开发环境，见下面的说明（从模板仓库带来）。
+这个仓库是 Hermes 插件：云吞的默认 Agent，以 Matrix bot 身份和主人对话，模型用 Hermes 自带的供应商接入。飞书、钉钉、企业微信、QQ、个人微信这些国内 IM 渠道在插件详情页的「设置」里逐个启用（见下面的「国内 IM 渠道」）；Telegram 在插件网页的原生 Channels 页填凭据和白名单。怎么写插件、怎么用开发环境，见下面的说明（从模板仓库带来）。
+
+## 模型
+
+模型只用 Hermes 自带的供应商接入：插件不申请 `models`，不依赖云吞的模型网关，没装网关、网关坏了都照样
+装、照样用。主人在插件网页（打开即是 Hermes 的 Models 页）的 Keys 页填服务商的 API key 或登录订阅，再在 Models
+页选主模型；Hermes 把 key 写进这个 Bot 数据目录的 `.env`，模型写回 `config.yaml`。能接哪些服务商、怎么登录以镜像
+对应的上游版本为准（`website/docs/user-guide/configuring-models.md`、`hermes_cli/web_server_oauth.py`）。
+辅助任务用上游默认的 `auto`，跟随主模型。
+
+还没选模型（`config.yaml` 里没有 `model.default`）时，wonton 插件按说话人的语言回一句去插件网页设置，不把上游
+“去终端跑 `hermes model`”的报错发进聊天。key 无效、额度用完这类短报错经语言包改写成指向同一个网页的 Keys 或 Models 页。
+
+旧版本经模型网关（magpie）用模型；升级时 init 撤掉旧包写的 `model.provider: custom:magpie` 和 `providers.magpie`
+（地址仍是 `${WONTON_MODEL_BASE_URL}` 占位符的那条），之后算“还没选模型”。想继续用 magpie，可以把它当自定义的
+OpenAI 兼容服务商填进 Hermes，但插件没有 `models` 权限，经核心别名 `models.wonton.internal` 访问网关会被拒，只能
+用网关自己对外的地址。
+
+容器里的工具能读这个 Bot 的数据目录，也就能读到这里存的 key 和登录态（见下一节）。
 
 ## 工具与确认的边界
 
@@ -521,7 +539,7 @@ README 的图标一节只留一句来源和商标说明，指向 `NOTICE`，不�
 不动已有的 `.wonton`。插件自己的探测写在 `scripts/smoke-probes.sh`（模板带示例），没写探测的项 FAIL 并给出写法。
 要用出口代理时设 `WONTON_DEV_EGRESS_PROXY=http://…`，不设就不配。
 
-`tests/` 是钩子的行为测试：本地起一个假核心，模型的列表和按人回语言的 MCP 工具都是真的 HTTP 请求。装好依赖再跑：
+`tests/` 是钩子和 init 的行为测试：本地起一个假核心，按人回语言的 MCP 工具是真的 HTTP 请求。装好依赖再跑：
 
 ```bash
 uv venv .venv-test && uv pip install --python .venv-test/bin/python httpx ruamel.yaml
