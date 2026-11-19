@@ -120,6 +120,7 @@ def register(ctx):
     ctx.register_locale_dir(Path(__file__).with_name("locales"))
     ctx.register_hook("post_gateway_admission", missing_model_hint)
     ctx.register_hook("pre_llm_call", send_files_context)
+    from . import commands
     from . import message_batch
     from . import side_chat
     from . import turn
@@ -127,3 +128,4 @@ def register(ctx):
     turn.register(ctx)
     side_chat.register(ctx)
     message_batch.register(ctx)
+    commands.register(ctx)
