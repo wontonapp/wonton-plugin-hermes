@@ -43,6 +43,9 @@ class Origin:
     chat_id, thread_id, platform, user_id = ROOM, None, "matrix", OWNER
 
 
+SOURCE = Origin
+
+
 class Entry:
     def __init__(self):
         self.origin = Origin()
@@ -143,7 +146,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         return "zh-Hans"
 
     def _post(self, url, json=None, headers=None, **kwargs):
-        self.sent.append((url, json, headers))
+        self.sent.append((url, dict(json), headers))
         if self.answer is not None:
             return self.answer(json)
         return Response({"chain": "c-1", "layer": 1}) if json["phase"] == "start" else Response({})
@@ -223,7 +226,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(SID, turn._S["active"])
         turn.on_session_end(session_id=SID)
         await asyncio.sleep(0.05)
-        self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start"])
+        self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start", "start"])
 
     async def test_a_limit_refusal_blocks_the_turn_and_still_reports_the_end(self):
         self.answer = lambda body: Response({"type": "limit_reached", "kind": "depth"}, status=429)
@@ -285,19 +288,58 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         await self.turn()
         self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start"])
 
+    async def test_the_fresh_message_wins_over_the_previous_origin(self):
+        # 被打断、重置后 peek 不到会话 id，pre_gateway_dispatch 只写 pending；下一句仍要报新消息，
+        # 不然核心按旧消息的唤醒标签找到停了的链，整轮被拒。
+        await self.turn()
+        turn.on_session_end(session_id=SID)
+        await asyncio.sleep(0.05)
+        self.sent.clear()
+        with mock.patch.object(Event, "message_id", "$event-2"):
+            await self.turn()
+        self.assertEqual(self.sent[0][1]["event_id"], "$event-2")
+
+    async def test_a_stopped_chain_is_reported_again_without_the_message(self):
+        def answer(body):
+            if body["event_id"]:
+                return Response({"type": "stopped"}, 409)
+            return Response({"chain": "c-2", "layer": 1})
+
+        self.answer = answer
+        block, _ = await self.turn()
+        self.assertIsNone(block)
+        self.assertEqual([body["event_id"] for _, body, _ in self.sent], ["$event-1", ""])
+        turn.on_session_end(session_id=SID)
+        await asyncio.sleep(0.05)
+        self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start", "start", "end"])
+
 
 class OutboxCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        turn._S.update({"origins": {SID: {"session_key": "key:!dm1:example.org"}}, "runner": None})
+        turn._S.update({"origins": {SID: {"session_key": "key:!dm1:example.org", "source": SOURCE}}, "runner": None})
         self.receipts = []
 
-    async def test_cancel_turn_interrupts_the_session(self):
+    async def test_cancel_turn_goes_the_same_way_as_stop(self):
         runner = mock.Mock()
+        runner._interrupt_and_clear_session = mock.AsyncMock()
         turn._S["runner"] = runner
         with mock.patch.object(turn, "_receipt", self._receipt):
             await turn._do_outbox({"id": "o-1", "kind": {"type": "cancel_turn", "session": SID}})
-        runner._interrupt_running_turn.assert_called_once()
+        source = turn._S["origins"][SID]["source"]
+        runner._interrupt_and_clear_session.assert_awaited_once_with(
+            "key:!dm1:example.org", source,
+            interrupt_reason="云吞停链", invalidation_reason="wonton_chain_stopped")
+        runner._interrupt_running_turn.assert_not_called()
         self.assertEqual(self.receipts, [("o-1", {"result": "sent", "event_id": ""})])
+
+    async def test_cancel_without_the_source_frees_the_slot_itself(self):
+        runner = mock.Mock()
+        runner._interrupt_running_turn.return_value = 7
+        turn._S.update({"runner": runner, "origins": {SID: {"session_key": "key:!dm1:example.org"}}})
+        with mock.patch.object(turn, "_receipt", self._receipt):
+            await turn._do_outbox({"id": "o-2", "kind": {"type": "cancel_turn", "session": SID}})
+        runner._drop_turn_slot.assert_called_once_with("key:!dm1:example.org", run_generation=7)
+        self.assertEqual(self.receipts, [("o-2", {"result": "sent", "event_id": ""})])
 
     async def test_cancel_without_an_in_memory_origin_uses_the_session_store(self):
         runner = mock.Mock()

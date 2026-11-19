@@ -134,6 +134,7 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
             logger.debug("算会话键失败：%r", exc)
     found = {
         "sender": sender,
+        "source": source,
         "session_key": session_key,
         "room": room,
         "thread": getattr(source, "thread_id", None) or None,
@@ -152,6 +153,11 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
 def _origin(session_id):
     found = _S["origins"].get(session_id)
     if found is not None:
+        # 同一条会话的下一句：记在 pending 里的是这一句的消息和来源，盖掉上一轮的
+        # （被打断或重置以后 peek 不到会话 id，pre_gateway_dispatch 只写 pending）。
+        fresh = _S["pending"].pop(found.get("session_key"), None)
+        if fresh is not None:
+            found.update(fresh)
         return found
     store = _S["session_store"]
     if store is None or not session_id:
@@ -212,6 +218,11 @@ def pre_llm_call(session_id="", sender_id="", **_):
     if origin.get("thread"):
         body["thread"] = origin["thread"]
     verdict, refusal, detail = _chain_start(body)
+    if verdict == "stopped":
+        # 报到的链已经停了（唤醒标签还指着它，常见于主人刚按下停止）：去掉消息 id 再报一次，
+        # 核心就按会话新开一条链。停了的链本来也不接新消息，叫回同样开新链。
+        body["event_id"] = ""
+        verdict, refusal, detail = _chain_start(body)
     if verdict == "retry":
         return None
     _S["reported"].add(session_id)
@@ -471,13 +482,25 @@ async def _do_outbox(item, client=None):
         session = kind.get("session") or ""
         origin = _origin(session) or {}
         session_key = origin.get("session_key")
+        source = origin.get("source")
         runner = _runner()
         if session_key and runner is not None:
-            runner._interrupt_running_turn(
-                session_key,
-                interrupt_reason="云吞停链",
-                invalidation_reason="wonton_chain_stopped",
-            )
+            clear = getattr(runner, "_interrupt_and_clear_session", None)
+            if clear is not None and source is not None:
+                # 和 /stop 走同一条路：光打断不停用那一轮的槽，槽一直占着，之后的消息全被当成“忙”排队，没人放。
+                await clear(
+                    session_key,
+                    source,
+                    interrupt_reason="云吞停链",
+                    invalidation_reason="wonton_chain_stopped",
+                )
+            else:
+                generation = runner._interrupt_running_turn(
+                    session_key,
+                    interrupt_reason="云吞停链",
+                    invalidation_reason="wonton_chain_stopped",
+                )
+                runner._drop_turn_slot(session_key, run_generation=generation)
             await _receipt(item_id, {"result": "sent", "event_id": ""}, client)
         else:
             await _receipt(item_id, {"result": "failed", "category": "other"}, client)
