@@ -81,3 +81,46 @@ BATCH_NOTICE = {
     "zh-Hant": "這一組 {total} 條訊息只收到了 {received} 條，先按收到的處理了；之後再到的會單獨處理。",
     "ja": "{total} 件のうち {received} 件しか届いていないため、届いた分だけ処理しました。後から届いたものは別々に扱います。",
 }
+
+# 不接这一轮时回给说话人的话（调用链被核心拒掉，这一轮不推理）。
+CHAIN_STOPPED = {
+    "en": "This chain was stopped. Send the message again to start a new one.",
+    "zh-Hans": "这条链已经停了，重新发一句就开一条新链。",
+    "zh-Hant": "這條鏈已經停了，重新傳一句就開一條新鏈。",
+    "ja": "このチェーンは停止しました。もう一度送ると新しいチェーンが始まります。",
+}
+
+CHAIN_LIMIT = {
+    "en": "This chain is at its limit. Its owner has to extend it before it can go on.",
+    "zh-Hans": "这条链到上限了，要等链代表的人同意加额度才能接着做。",
+    "zh-Hant": "這條鏈到上限了，要等鏈代表的人同意加額度才能接著做。",
+    "ja": "このチェーンは上限に達しました。続けるにはチェーンの代表者の承認が必要です。",
+}
+
+CHAIN_BUSY = {
+    "en": "Too many conversations are running at once. Send the message again in a moment.",
+    "zh-Hans": "同时跑的会话太多了，稍等一下再发一句。",
+    "zh-Hant": "同時跑的會話太多了，稍等一下再傳一句。",
+    "ja": "同時に動いている会話が多すぎます。少し待ってから、もう一度送ってください。",
+}
+
+CHAIN_DENIED = {
+    "en": "The core doesn't know the sender as someone this bot listens to.",
+    "zh-Hans": "核心不认这个说话的人，他不在这个 Bot 听的人里。",
+    "zh-Hant": "核心不認這個說話的人，他不在這個 Bot 聽的人裡。",
+    "ja": "発言者をこの Bot の聞く相手としてコアが認めていません。",
+}
+
+CHAIN_SELF = {
+    "en": "The message came back to the same bot; a chain needs another bot.",
+    "zh-Hans": "消息又派回这个 Bot 自己了，链上要换一个 Bot。",
+    "zh-Hant": "訊息又派回這個 Bot 自己了，鏈上要換一個 Bot。",
+    "ja": "メッセージが同じ Bot に戻ってきました。チェーンには別の Bot が必要です。",
+}
+
+CHAIN_LOOP = {
+    "en": "This bot is already further up the chain, so the message needs a new chain.",
+    "zh-Hans": "这个 Bot 已经在这条链的上级，接着做要另起一条链。",
+    "zh-Hant": "這個 Bot 已經在這條鏈的上級，接著做要另起一條鏈。",
+    "ja": "この Bot はすでにチェーンの上流にいます。続けるには新しいチェーンが必要です。",
+}
