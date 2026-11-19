@@ -20,6 +20,8 @@ DID_FAIL=0
 # Agent 插件用的助手（扮演用户手机发加密消息等），插件在 extra_check 里组合。
 # shellcheck source=scripts/agent-probes.sh
 . "$(dirname "${BASH_SOURCE[0]}")/agent-probes.sh"
+# shellcheck source=scripts/smoke-evidence.sh
+. "$(dirname "${BASH_SOURCE[0]}")/smoke-evidence.sh"
 
 say() { echo "== $*"; }
 pass() { echo "PASS $1：$2"; }
@@ -110,6 +112,8 @@ probes_load() { # 读插件的探针；探针里可用的变量和助手在 prob
   MCP_TOOL=""
   MCP_ARGS='{}'
   SMOKE_NOTE=""
+  # shellcheck disable=SC2034 # smoke.sh 读，探针在 smoke-probes.sh 里覆盖
+  SMOKE_SETTINGS=()
   export WONTON_OWNER_EMAIL="${WONTON_OWNER_EMAIL:-$default_owner_email}"
   if [[ -f "$(probes_file)" ]]; then
     # shellcheck source=scripts/smoke-probes.sh
@@ -147,7 +151,90 @@ mcp() {
   local sub="${1:-}"
   shift || true
   if [[ "${1:-}" == http* ]]; then shift; fi
-  probes_dev mcp "$sub" "$@"
+  if [[ "$sub" != call ]]; then
+    probes_dev mcp "$sub" "$@"
+    return
+  fi
+  mcp_call_confirmed "$@"
+}
+# 工具调用期间把待答的确认卡片像主人一样答掉（工具要主人确认时没人答，调用就干等到超时）：调用在后台跑，
+# 前台轮询确认接口，取到卡片按主人会选的选项回答，不绕过确认。
+mcp_call_confirmed() {
+  local outf errf rc=0
+  outf="$(mktemp "${SMOKE_STATE%/*}/mcp-call.XXXXXX")"
+  errf="$(mktemp "${SMOKE_STATE%/*}/mcp-call.XXXXXX")"
+  probes_confirmer || true
+  probes_dev mcp call "$@" >"$outf" 2>"$errf" &
+  local pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    probes_confirm_pending
+    sleep 2
+  done
+  wait "$pid" || rc=$?
+  cat "$outf"
+  cat "$errf" >&2
+  rm -f "$outf" "$errf"
+  return "$rc"
+}
+# 答一轮待答的确认卡片（口径同 dev.sh 的 approve）：选项带 choice_id 的卡片（Agent 的权限卡）把卡上第一个
+# 允许类选项自己的 answer 和 choice_id 一起发回（只发 answer 会被 400 拒掉），普通卡片只发 approve；全是
+# 拒绝类选项的卡片答不了，跳过。轮询的读给 30 秒上限，机器忙时一次慢读不该把调用的时间预算吃光。
+probes_confirm_pending() {
+  local list cards id body title reply
+  list="$(smoke_api GET /_wonton/api/confirmations --max-time 30 2>/dev/null)" || return 1
+  # 每行三段（tab 分隔）：id、回答体（JSON）、标题。标题换掉制表符，别把行拆散。
+  cards="$(jq -r '
+    [.confirmations[]?
+      | ([.choices[]? | select(.choice_id and (.answer == "approve" or .answer == "approve_wider" or .answer == "allow_window"))][0]) as $a
+      | if $a != null then
+          [.id, ({answer: $a.answer, choice_id: $a.choice_id} | tostring), (.title | gsub("[\\t\\n\\r]"; " "))]
+        elif ([(.choices // [])[]?.choice_id] | map(select(. != null)) | length) == 0 then
+          [.id, "{\"answer\":\"approve\"}", (.title | gsub("[\\t\\n\\r]"; " "))]
+        else empty end]
+    | .[] | @tsv' <<<"$list" 2>/dev/null)" || cards=""
+  [[ -n "$cards" ]] || return 1
+  while IFS=$'\t' read -r id body title; do
+    [[ -n "$id" ]] || continue
+    if reply="$(smoke_api POST "/_wonton/confirmations/$id" -H 'Content-Type: application/json' -d "$body" 2>&1)"; then
+      # 套件冒烟里 say 走标准输出，会混进调用方捕获的 mcp 结果，打到标准错误。
+      echo "==> 确认卡片已同意：$title" >&2
+    else
+      echo "确认卡片没答成：$title：$(tail -c 200 <<<"$reply" | tr '\n' ' ')" >&2
+    fi
+  done <<<"$cards"
+}
+PROBES_CONFIRMER=""
+# 冒烟的确认验收设备：核心开卡前查收件人名下有没有已配对的设备，没有就连卡片一起撤掉、调用当场失败
+# （冒烟实例是新装的，主人一台设备都没配过）。给冒烟配一台一次性的：配对在设备表里留下记录就够，设备
+# 不在线时推送发不出去也不拦卡片（核心只记日志），卡片留在表里由冒烟的主人令牌答。整个冒烟只配一次；
+# 配不上说一次原因就放手，工具不要确认的插件不受影响。
+probes_confirmer() {
+  [[ "$PROBES_CONFIRMER" == ok ]] && return 0
+  [[ -z "$PROBES_CONFIRMER" ]] || return 1
+  local image pairing hostport port out
+  image="${WONTON_SMOKE_TUNNEL_CLIENT_IMAGE:-$SMOKE_TUNNEL_CLIENT_IMAGE}"
+  hostport="${SMOKE_BASE#*://}"
+  hostport="${hostport%%/*}"
+  port="${hostport##*:}"
+  # 配对码带上回环直连地址（隧道的直连端口是网页端口的下一个）：tunnel-client 在核心的网络命名空间里跑，直连够得着。
+  pairing="$(docker exec "$SMOKE_CORE" wonton-core pair "127.0.0.1:$((port + 1))" 2>&1 | grep '^wonton://pair?' | tail -1)"
+  if [[ -z "$pairing" ]]; then
+    PROBES_CONFIRMER="核心没给出配对码"
+    echo "==> 确认卡片的验收设备没配上：$PROBES_CONFIRMER（工具要主人确认的调用会没人答）" >&2
+    return 1
+  fi
+  docker image inspect "$image" >/dev/null 2>&1 || nice -n 19 docker pull "$image" >/dev/null 2>&1
+  if out="$(docker run --rm --network "container:$SMOKE_CORE" --entrypoint sh "$image" \
+    -c 'tunnel-client --key /tmp/smoke-confirmer.key id >/dev/null && exec tunnel-client --key /tmp/smoke-confirmer.key pair "$1" --name smoke-confirmer' \
+    smoke-confirmer "$pairing" 2>&1)"; then
+    PROBES_CONFIRMER=ok
+    # 套件冒烟里 say 走标准输出，会混进调用方捕获的 mcp 结果，这里一律打到标准错误。
+    echo "==> 确认卡片的验收设备已配对：工具要主人确认时，冒烟从确认接口替主人答" >&2
+    return 0
+  fi
+  PROBES_CONFIRMER="配对没成：$(tail -c 200 <<<"$out" | tr '\n' ' ')"
+  echo "==> 确认卡片的验收设备没配上：$PROBES_CONFIRMER" >&2
+  return 1
 }
 smoke_api() {
   local method="$1" path="$2"
@@ -383,12 +470,15 @@ extra_item() {
 # 限时 EXTRA_TIMEOUT 秒（探针里设，默认 600）。记了子项时先逐行打印子项，再打一行汇总：钩子非 0 或任一子项 FAIL
 # 是 FAIL，子项全是 N/A 是 N/A，否则 PASS。
 probes_extra() {
-  local before out rc=0 verdict item why passed=0 total=0 broken=""
+  local before out rc=0 verdict item why passed=0 total=0 broken="" since
   declare -F extra_check >/dev/null || return 0
   say "附加检查（extra_check）"
   before="$(wc -c <"$PROBES_LOG")"
   SMOKE_EXTRA_ITEMS="$(mktemp "${SMOKE_STATE%/*}/extra-items.XXXXXX")"
   export SMOKE_EXTRA_ITEMS
+  SMOKE_EXTRA_SINCE_FILE="$SMOKE_EXTRA_ITEMS.since"
+  export SMOKE_EXTRA_SINCE_FILE
+  probes_evidence_start
   probes_hook extra_check "${EXTRA_TIMEOUT:-600}" || rc=$?
   while IFS=$'\t' read -r verdict item why; do
     total=$((total + 1))
@@ -398,15 +488,19 @@ probes_extra() {
       *) na "附加检查·$item" "$why" ;;
     esac
   done <"$SMOKE_EXTRA_ITEMS"
-  rm -f "$SMOKE_EXTRA_ITEMS"
-  unset SMOKE_EXTRA_ITEMS
   out="$(tail -c "+$((before + 1))" "$PROBES_LOG" | tail -c 200 | tr '\n' ' ')"
+  if ((rc != 0)) || [[ -n "$broken" ]]; then
+    since="$(cat "$SMOKE_EXTRA_SINCE_FILE")"
+    probes_extra_failure_evidence "$since" >>"$PROBES_LOG" 2>&1
+  fi
+  rm -f "$SMOKE_EXTRA_ITEMS" "$SMOKE_EXTRA_SINCE_FILE"
+  unset SMOKE_EXTRA_ITEMS SMOKE_EXTRA_SINCE_FILE
   if ((rc == 124)); then
     fail 附加检查 "extra_check 超过 ${EXTRA_TIMEOUT:-600} 秒没跑完，见 $PROBES_LOG 末尾：$out"
   elif ((rc != 0)); then
     fail 附加检查 "extra_check 失败（退出 $rc），见 $PROBES_LOG 末尾：$out"
   elif [[ -n "$broken" ]]; then
-    fail 附加检查 "子项失败：$broken"
+    fail 附加检查 "子项失败：$broken；失败取证见 $PROBES_LOG"
   elif ((total == 0)); then
     pass 附加检查 "extra_check 通过${out:+：$out}"
   elif ((passed == 0)); then
