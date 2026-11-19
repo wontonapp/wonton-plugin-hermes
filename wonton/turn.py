@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .locale import language
-from .texts import CHAIN_BUSY, CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_SELF, CHAIN_STOPPED
+from .texts import CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_OTHER, CHAIN_SELF, CHAIN_STOPPED
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +230,7 @@ def pre_llm_call(session_id="", sender_id="", **_):
     # 其他拒绝：链没开成，也要报 End，让核心把这轮放掉。
     _S["ending"].add(session_id)
     logger.info("核心不收这一轮（%r）：%s", refusal, detail)
-    return {"action": "block", "message": _refusal_text(refusal, sender)}
+    return {"action": "block", "message": _refusal_text(refusal, sender, detail)}
 
 
 def _language(sender):
@@ -262,17 +262,24 @@ def _language(sender):
     return box["lang"]
 
 
-def _refusal_text(refusal, sender):
-    """核心的拒绝类别换成给说话人看的一句话。"""
+def _refusal_text(refusal, sender, detail=""):
+    """核心的拒绝类别换成给说话人看的一句话。
+
+    类别说不清的地方（同样的 ``invalid_input`` 既可能是绕圈，也可能是这一轮还挂在别的链上；
+    ``other`` 什么都可能是）把核心给的说明接在后面。
+    """
     lang = _language(sender)
     kind = refusal.get("type")
     if kind == "permission_denied":
         return CHAIN_DENIED[lang]
-    if kind == "busy":
-        return CHAIN_BUSY[lang]
-    if kind == "invalid_input":
-        return CHAIN_SELF[lang] if refusal.get("refusal") == "self_call" else CHAIN_LOOP[lang]
-    return CHAIN_LIMIT[lang]
+    if kind == "limit_reached":
+        return CHAIN_LIMIT[lang]
+    if kind == "invalid_input" and refusal.get("refusal") == "self_call":
+        return CHAIN_SELF[lang]
+    if kind == "invalid_input" and refusal.get("refusal") == "loop":
+        return CHAIN_LOOP[lang]
+    text = CHAIN_OTHER[lang]
+    return f"{text}\n\n{detail}" if detail else text
 
 
 def on_session_end(session_id="", **_):

@@ -233,10 +233,9 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start", "end"])
 
-    async def test_permission_and_busy_refusals_have_their_own_words(self):
+    async def test_every_refusal_has_its_own_words(self):
         for status, body, text in (
             (403, {"type": "permission_denied"}, turn.CHAIN_DENIED),
-            (429, {"type": "busy"}, turn.CHAIN_BUSY),
             (400, {"type": "invalid_input", "refusal": "self_call"}, turn.CHAIN_SELF),
             (400, {"type": "invalid_input", "refusal": "loop"}, turn.CHAIN_LOOP),
         ):
@@ -245,6 +244,21 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
             self.sent.clear()
             block, _ = await self.turn()
             self.assertEqual(block["message"], text["zh-Hans"])
+
+    async def test_an_unclear_refusal_carries_the_cores_reason(self):
+        # 同样的 invalid_input 也可能是这一轮的会话还挂在别的链上，类别本身说不清。
+        self.answer = lambda _body: Response(
+            {"type": "invalid_input", "refusal": "other"}, 400, "会话 s-1 已登记在别的链上"
+        )
+        block, _ = await self.turn()
+        self.assertEqual(
+            block["message"], turn.CHAIN_OTHER["zh-Hans"] + "\n\n会话 s-1 已登记在别的链上"
+        )
+
+    async def test_an_unknown_refusal_type_isnt_called_a_limit(self):
+        self.answer = lambda _body: Response({"type": "other"}, 400)
+        block, _ = await self.turn()
+        self.assertEqual(block["message"], turn.CHAIN_OTHER["zh-Hans"])
 
     async def test_an_unreported_chain_is_retried_on_the_next_call(self):
         self.answer = lambda body: Response({}, status=503)
