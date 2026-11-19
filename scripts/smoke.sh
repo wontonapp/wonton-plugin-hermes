@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 插件合并前的端到端冒烟：用工作区的插件起一套一次性开发环境，六项真实请求，不用 mock。
-#   scripts/dev.sh smoke [--upgrade-from <tag> | --no-upgrade <原因>] [--bridge-image <镜像>]
+#   scripts/dev.sh smoke [--upgrade-from <tag> | --no-upgrade <原因>] [--setting <名字>=<值>]…
 # 六项：装得上 / 网页打得开 / 用户身份能用 / 工具 Bot 调得到 / 升级保数据 / 重装保数据；探针写了 extra_check 时另有一项附加检查。任何 FAIL 退出非 0。
 # 插件自己的探测在 scripts/smoke-probes.sh，写法见模板里的这个文件；一个仓库放多家插件时，WONTON_PLUGIN 指插件目录，
 # 探针放在那个目录的 smoke-probes.sh。
@@ -20,12 +20,12 @@ set -uo pipefail
 usage() { sed -n '2,4p' "$0" >&2; exit 2; }
 upgrade_from=""
 no_upgrade=""
-bridge_image=""
+cli_settings=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --upgrade-from) [[ $# -ge 2 && -n "$2" ]] || usage; upgrade_from="$2"; shift 2 ;;
     --no-upgrade) [[ $# -ge 2 && -n "$2" ]] || usage; no_upgrade="$2"; shift 2 ;;
-    --bridge-image) [[ $# -ge 2 && -n "$2" ]] || usage; bridge_image="$2"; shift 2 ;;
+    --setting) [[ $# -ge 2 && "$2" == ?*=* ]] || usage; cli_settings+=("$2"); shift 2 ;;
     *) usage ;;
   esac
 done
@@ -160,26 +160,56 @@ tar -C "$root" --exclude=.wonton --exclude=.git -cf - . | tar -C "$copy" -xf - |
 # dev.sh 从复制出来的工作区里 git archive 出 tag：.git 用符号链接指回原仓库，不复制对象。
 [[ ! -d "$root/.git" ]] || ln -s "$root/.git" "$copy/.git"
 chmod -R a+rX "$copy"
+# Compose 解析短卷时会把未注入的 `${WONTON_SHARE_NAME:?…}` 冒号误判为路径字段。
+# 冒烟只读清单，按 storage.share 声明填临时目录；正式安装时核心会注入同名变量。
+facts_dir="$work/compose-facts"
+mkdir "$facts_dir"
+cp -a "$SMOKE_PLUGIN/." "$facts_dir/"
+share_env_file="$work/share.env"
+python3 - "$SMOKE_PLUGIN/docker-compose.yml" "$facts_dir/docker-compose.yml" "$work/shares" >"$share_env_file" <<'PY'
+import re, sys
 
-# --bridge-image：只换复制出来的工作区里 bridge 服务的镜像（升级起点的 tag 仍用它自己的清单）。插件没有 bridge 服务时
-# 报错退出：调用方要测的是换过的桥，静默跳过就等于没测。
-if [[ -n "$bridge_image" ]]; then
-  compose_json() { (cd "$SMOKE_PLUGIN" && docker compose -f docker-compose.yml config --no-interpolate --format json); }
-  facts="$(compose_json)" || die "解析不了 docker-compose.yml"
-  if [[ "$(jq -r '.services.bridge // empty | type' <<<"$facts")" != object ]]; then
-    echo "--bridge-image：清单里没有 bridge 服务，换不了桥镜像" >&2
-    exit 2
-  fi
-  replace_service_image "$SMOKE_PLUGIN/docker-compose.yml" bridge "$bridge_image" ||
-    die "--bridge-image：没找到 bridge 服务的 image 行（镜像写在锚点或扩展里时换不了）"
-  [[ "$(compose_json | jq -r '.services.bridge.image')" == "$bridge_image" ]] ||
-    die "--bridge-image：换完以后 bridge 的镜像不是 $bridge_image"
-  say "bridge 服务的镜像换成 $bridge_image"
-fi
+source = open(sys.argv[1], encoding="utf-8").read()
+lines = source.splitlines()
+try:
+    start = next(i for i, line in enumerate(lines) if line == "x-wonton:")
+except StopIteration:
+    raise SystemExit("清单没有 x-wonton")
+block = []
+for line in lines[start + 1:]:
+    if line and not line[0].isspace():
+        break
+    block.append(line)
+manifest = "\n".join(block)
+permissions = re.search(r"(?ms)^  permissions:\s*(.*?)(?=^  \S|\Z)", manifest)
+text = re.sub(r"#.*", "", permissions.group(1) if permissions else "")
+names = sorted(set(re.findall(r"storage\.share\.([a-z0-9]+(?:-[a-z0-9]+)*):(?:read|write)", text)))
+for name in names:
+    variable = "WONTON_SHARE_" + name.upper().replace("-", "_")
+    print(f"{variable}={sys.argv[3]}/{name}")
+    source = re.sub(r"\$\{" + re.escape(variable) + r"[^}]*\}", f"{sys.argv[3]}/{name}", source)
+open(sys.argv[2], "w", encoding="utf-8").write(source)
+PY
+while IFS='=' read -r name path; do
+  [[ -z "$name" ]] || { mkdir -p "$path"; export "$name=$path"; }
+done <"$share_env_file"
 
-probes_facts "$SMOKE_PLUGIN"
+probes_facts "$facts_dir"
 probes_load
+# 插件设置值：探针声明的 SMOKE_SETTINGS 在前，命令行的 --setting 在后，同名时后给的算数。每次安装都带上。
+setting_args=()
+for pair in "${SMOKE_SETTINGS[@]}" "${cli_settings[@]}"; do
+  setting_args+=(--setting "$pair")
+done
 
+gpu_rc=0
+"$copy/scripts/smoke-gpu.sh" "$facts_dir" || gpu_rc=$?
+if ((gpu_rc == 77)); then
+  say "跳过：需要显卡，没跑"
+  exit 77
+elif ((gpu_rc != 0)); then
+  die "GPU 冒烟前置检查失败（退出码 $gpu_rc）"
+fi
 # ---------- 1. 装得上 ----------
 say "1. 装得上（check、install、running healthy）"
 chk_out="$(cd "$copy" && WONTON_PLUGIN="$SMOKE_PLUGIN" nice -n 19 timeout 900 scripts/check.sh 2>&1)" && chk_rc=0 || chk_rc=$?
@@ -242,7 +272,7 @@ data_wrote=0
 data_upgrade_base=0
 if [[ "$DATA_NA" != 1 ]] && (( DATA_HOOKS )) && [[ -n "$upgrade_from" ]]; then
   say "装 tag $upgrade_from（写数据后升级）"
-  if probes_dev_t 600 install --yes "$upgrade_from" >>"$LOG" 2>&1 &&
+  if probes_dev_t 600 install --yes "${setting_args[@]}" "$upgrade_from" >>"$LOG" 2>&1 &&
     probes_status_wait "$PROBES_PLUGIN_ID" 40 >/dev/null; then
     data_upgrade_base=1
     # 钩子要用网页地址和用户会话：这一轮在主安装之前，probes_run 还没取过、也没登录过。
@@ -258,7 +288,7 @@ fi
 # 装过升级起点时，核心不接受 install 覆盖已装的插件（同一版本号也一样）：升级用 reinstall，保留数据。
 install_cmd=install
 ((data_upgrade_base == 1)) && install_cmd=reinstall
-if ! probes_dev "$install_cmd" --yes >>"$LOG" 2>&1; then
+if ! probes_dev "$install_cmd" --yes "${setting_args[@]}" >>"$LOG" 2>&1; then
   fail 装得上 "dev.sh $install_cmd --yes 失败，看 $LOG"
   for item in 网页打得开 用户身份能用 工具Bot调得到; do fail "$item" "装不上"; done
   exit 0
@@ -295,7 +325,7 @@ else
     fi
   fi
   if [[ "$data_wrote" == 1 ]]; then
-    if probes_dev_t 900 reinstall --yes >>"$LOG" 2>&1 &&
+    if probes_dev_t 900 reinstall --yes "${setting_args[@]}" >>"$LOG" 2>&1 &&
       probes_status_wait "$PROBES_PLUGIN_ID" 40 >/dev/null; then
       probes_data_check 重装保数据 "reinstall 后"
     else
