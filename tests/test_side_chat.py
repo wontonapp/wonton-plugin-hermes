@@ -84,7 +84,7 @@ class FakeClient:
             raise RuntimeError(f"event {event_id} not found")
         return self.roots[event_id]
 
-    async def joined_members(self, room):
+    async def get_joined_members(self, room):
         if room not in self.members:
             raise RuntimeError(f"no members for {room}")
         return self.members[room]

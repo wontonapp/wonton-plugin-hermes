@@ -336,7 +336,7 @@ async def _declare_all_dm_rooms():
         if room in _S["declared"]:
             continue
         try:
-            members = await client.joined_members(room)
+            members = await client.get_joined_members(room)
             count = len(members.members) if getattr(members, "members", None) is not None else None
         except Exception as exc:
             logger.warning("查房间成员数失败 room=%s：%r", room, exc)

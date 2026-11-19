@@ -295,6 +295,8 @@ def _refusal_text(refusal, sender, detail=""):
 
 def on_session_end(session_id="", **_):
     """这一轮结束：清身份，报过的链报结束。"""
+    if _S["ending"] and session_id not in _S["ending"]:
+        logger.info("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
     _S["active"].pop(session_id, None)
     _S["reported"].discard(session_id)
     origin = _S["origins"].pop(session_id, None) or {}
