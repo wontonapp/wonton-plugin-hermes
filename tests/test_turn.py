@@ -82,6 +82,7 @@ class Session:
 
     async def call_tool(self, name, arguments=None, **kwargs):
         self.calls.append((name, arguments, kwargs))
+        self.headers.append(self._resolve_param_headers(name, arguments))
         return "ok"
 
 
@@ -91,11 +92,14 @@ class Server:
 
 
 class Response:
-    def __init__(self, body):
-        self.body = body
+    def __init__(self, body=None, status=200, detail=""):
+        self.body, self.status_code = body, status
+        self.headers = {"X-Wonton-Detail": detail}
+        self.is_success = status < 400
 
     def raise_for_status(self):
-        pass
+        if not self.is_success:
+            raise turn.httpx.HTTPStatusError("boom", request=None, response=self)
 
     def json(self):
         return self.body
@@ -105,29 +109,55 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.store = Store()
         self.server = Server()
-        turn._S.update({"loop": None, "runner": None, "session_store": None, "origins": {}, "pending": {}, "tokens": {}, "worker": True})
+        self.env = {"HERMES_SESSION_ID": SID}
+        self.sent = []
+        self.answer = None
+        turn._S.update({
+            "loop": None, "runner": None, "session_store": None, "origins": {}, "pending": {},
+            "active": {}, "reported": set(), "ending": set(), "worker": True,
+        })
         turn._install_headers()
-        self.vars = mock.patch.dict("os.environ", {
+        modules = mock.patch.dict("os.environ", {
             "WONTON_MCP_URL": "http://core:8080/mcp/bus-token",
             "MATRIX_ACCESS_TOKEN": "bot-token",
         })
-        self.vars.start()
-        self.addCleanup(self.vars.stop)
-        self.chain = mock.patch.object(turn, "_post_chain", lambda *a, **k: None)
-        self.chain.start()
-        self.addCleanup(self.chain.stop)
+        modules.start()
+        self.addCleanup(modules.stop)
+        context = mock.patch.dict(sys.modules, {"gateway.session_context": self._context()})
+        context.start()
+        self.addCleanup(context.stop)
+        lang = mock.patch.object(turn, "language", self._language)
+        lang.start()
+        self.addCleanup(lang.stop)
+        http = mock.patch.object(turn.httpx, "post", self._post)
+        http.start()
+        self.addCleanup(http.stop)
+
+    def _context(self):
+        env = self.env
+        module = types.ModuleType("gateway.session_context")
+        module.get_session_env = lambda name, default="": env.get(name, default)
+        return module
+
+    async def _language(self, sender):
+        return "zh-Hans"
+
+    def _post(self, url, json=None, headers=None, **kwargs):
+        self.sent.append((url, json, headers))
+        if self.answer is not None:
+            return self.answer(json)
+        return Response({"chain": "c-1", "layer": 1}) if json["phase"] == "start" else Response({})
 
     async def turn(self):
         turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
-        turn.pre_llm_call(session_id=SID, sender_id=OWNER)
-        return await handlers._call_tool_racing_stdio_death(
+        return turn.pre_llm_call(session_id=SID, sender_id=OWNER), await handlers._call_tool_racing_stdio_death(
             self.server, "wonton__save_file", {"x": 1})
 
     async def test_tool_call_carries_sender_session_and_origin(self):
-        self.assertEqual(await self.turn(), "ok")
+        self.assertEqual((await self.turn())[1], "ok")
         name, args, kwargs = self.server.session.calls[0]
         self.assertEqual((name, args), ("wonton__save_file", {"x": 1}))
-        headers = self.server.session._resolve_param_headers(name, args)
+        headers = self.server.session.headers[0]
         self.assertEqual(headers["X-Wonton-On-Behalf-Of"], OWNER)
         self.assertEqual(headers["wonton-session"], SID)
         self.assertEqual(headers["Mcp-Param-Owner"], "1")
@@ -137,8 +167,16 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.server.session._wonton_turn = False
         await handlers._call_tool_racing_stdio_death(
             self.server, "x", {})
-        self.assertEqual(self.server.session._resolve_param_headers("x", {}), {"Mcp-Param-Owner": "1"})
+        self.assertEqual(self.server.session.headers[-1], {"Mcp-Param-Owner": "1"})
         self.assertNotIn("meta", self.server.session.calls[0][2])
+
+    async def test_the_identity_comes_from_the_session_not_the_hook_thread(self):
+        turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
+        self.env.pop("HERMES_SESSION_ID")
+        turn.pre_llm_call(session_id=SID, sender_id=OWNER)
+        self.env["HERMES_SESSION_ID"] = SID
+        await handlers._call_tool_racing_stdio_death(self.server, "x", {})
+        self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], OWNER)
 
     async def test_end_clears_the_turn(self):
         await self.turn()
@@ -147,19 +185,13 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("key:!dm1:example.org", turn._S["pending"])
         await handlers._call_tool_racing_stdio_death(
             self.server, "x", {})
-        self.assertNotIn("wonton-session", self.server.session._resolve_param_headers("x", {}))
+        self.assertNotIn("wonton-session", self.server.session.headers[-1])
 
     async def test_end_without_a_start_is_not_reported(self):
-        sent = []
-
-        def post(url, json=None, headers=None, **kwargs):
-            sent.append(json)
-
-        self.chain.stop()
-        with mock.patch.object(turn.httpx, "post", post):
-            turn.on_session_end(session_id="never-started")
-            await asyncio.sleep(0.05)
-        self.assertEqual(sent, [])
+        self.sent.clear()
+        turn.on_session_end(session_id="never-started")
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.sent, [])
 
     async def test_the_outbox_worker_task_is_retained(self):
         async def sleeper():
@@ -174,23 +206,70 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
                 await turn._S["worker"]
 
     async def test_chain_start_and_end_are_reported(self):
-        sent = []
-
-        def post(url, json=None, headers=None, **kwargs):
-            sent.append((url, json, headers))
-            return Response({"chain": "c-1", "layer": 1} if json["phase"] == "start" else {})
-
-        self.chain.stop()
-        with mock.patch.object(turn.httpx, "post", post):
-            await self.turn()
-            turn.on_session_end(session_id=SID)
-            await asyncio.sleep(0.05)
-        self.assertEqual(sent[0][0], "http://core:8080/mcp/bus-token/agent/chains")
-        self.assertEqual(sent[0][1], {
+        await self.turn()
+        turn.on_session_end(session_id=SID)
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.sent[0][0], "http://core:8080/agent/chains/bus-token")
+        self.assertEqual(self.sent[0][1], {
             "phase": "start", "session": SID, "room": ROOM, "sender": OWNER, "event_id": "$event-1",
         })
-        self.assertEqual(sent[0][2], {"X-Wonton-Bot-Token": "bot-token"})
-        self.assertEqual(sent[1][1], {"phase": "end", "session": SID})
+        self.assertEqual(self.sent[0][2], {"X-Wonton-Bot-Token": "bot-token"})
+        self.assertEqual(self.sent[1][1], {"phase": "end", "session": SID})
+
+    async def test_a_stopped_chain_blocks_the_turn_without_an_end(self):
+        self.answer = lambda body: Response({"type": "stopped"}, status=409)
+        block, _ = await self.turn()
+        self.assertEqual(block, {"action": "block", "message": turn.CHAIN_STOPPED["zh-Hans"]})
+        self.assertNotIn(SID, turn._S["active"])
+        turn.on_session_end(session_id=SID)
+        await asyncio.sleep(0.05)
+        self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start"])
+
+    async def test_a_limit_refusal_blocks_the_turn_and_still_reports_the_end(self):
+        self.answer = lambda body: Response({"type": "limit_reached", "kind": "depth"}, status=429)
+        block, _ = await self.turn()
+        self.assertEqual(block, {"action": "block", "message": turn.CHAIN_LIMIT["zh-Hans"]})
+        turn.on_session_end(session_id=SID)
+        await asyncio.sleep(0.05)
+        self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start", "end"])
+
+    async def test_permission_and_busy_refusals_have_their_own_words(self):
+        for status, body, text in (
+            (403, {"type": "permission_denied"}, turn.CHAIN_DENIED),
+            (429, {"type": "busy"}, turn.CHAIN_BUSY),
+            (400, {"type": "invalid_input", "refusal": "self_call"}, turn.CHAIN_SELF),
+            (400, {"type": "invalid_input", "refusal": "loop"}, turn.CHAIN_LOOP),
+        ):
+            self.answer = lambda _body, status=status, body=body: Response(body, status=status)
+            turn._S.update({"reported": set(), "ending": set(), "origins": {}})
+            self.sent.clear()
+            block, _ = await self.turn()
+            self.assertEqual(block["message"], text["zh-Hans"])
+
+    async def test_an_unreported_chain_is_retried_on_the_next_call(self):
+        self.answer = lambda body: Response({}, status=503)
+        turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
+        self.assertIsNone(turn.pre_llm_call(session_id=SID, sender_id=OWNER))
+        self.sent.clear()
+        self.answer = None
+        self.assertIsNone(turn.pre_llm_call(session_id=SID, sender_id=OWNER))
+        self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start"])
+        self.assertIn(SID, turn._S["active"])
+
+    async def test_the_start_is_reported_once_per_turn(self):
+        turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
+        turn.pre_llm_call(session_id=SID, sender_id=OWNER)
+        turn.pre_llm_call(session_id=SID, sender_id=OWNER)
+        self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start"])
+
+    async def test_a_new_message_reports_the_chain_again(self):
+        await self.turn()
+        turn.on_session_end(session_id=SID)
+        await asyncio.sleep(0.05)
+        self.sent.clear()
+        self.store.keys["key:!dm1:example.org"] = SID
+        await self.turn()
+        self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start"])
 
 
 class OutboxCase(unittest.IsolatedAsyncioTestCase):

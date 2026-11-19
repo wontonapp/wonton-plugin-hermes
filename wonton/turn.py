@@ -2,15 +2,21 @@
 
 云吞核心靠请求头知道 MCP 工具调用替谁说话、属于哪一轮：``X-Wonton-On-Behalf-Of`` 是说话人，
 ``wonton-session`` 是这一轮的会话，``app.wonton/origin`` 的 ``_meta`` 给房间和话题。Hermes 的 MCP
-客户端每轮不带这些，所以在工具处理器的调用上加；值来自钩子记下的当前一轮。
+客户端每轮不带这些，所以在工具处理器的调用上加；值来自会话环境（见下）。
 
-开轮时向核心报链（``POST <核心>/agent/chains``，带 Bot 的 Matrix 令牌），核心按说话人验证；结束回
-``End``。核心停链时往出箱（``GET/POST …/agent/outbox``）放 ``CancelTurn``，这里实时取、打断对应会话
-并回报；批准过的私聊消息（``Message``）由这里用 Bot 的 Matrix 客户端发出，出箱项 ID 当 Matrix 事务
-ID，核心重发同一条不会发两遍。
+开轮时向核心报链（``POST <核心>/agent/chains/<令牌>``，带 Bot 的 Matrix 令牌），核心按说话人验证，
+被拒时这一轮就以那条原因结束、不再推理；结束报 ``End``。核心停链时往出箱
+（``GET/POST <核心>/agent/outbox/<令牌>``）放 ``CancelTurn``，这里实时取、打断对应会话并回报；
+批准过的私聊消息（``Message``）由这里用 Bot 的 Matrix 客户端发出，出箱项 ID 当 Matrix 事务 ID，
+核心重发同一条不会发两遍。
+
+身份从 ``gateway.session_context`` 的会话环境取（``HERMES_SESSION_ID`` 等），不靠钩子里的
+contextvar：``pre_llm_call`` 在单独的线程里跑，它 set 的 contextvar 回到 Agent 线程就没了。工具处理器
+在 Agent 线程上跑，那里的会话环境是对的，``_run_on_mcp_loop`` 提交时上游用
+``asyncio.run_coroutine_threadsafe`` 复制调用方的 contextvars，所以处理器里 set 的值在 MCP 循环上也看得到。
 
 上游没有插件能挂的“每次工具调用”钩子，只能包它内部的处理器调用；升级 Hermes 时先复查
-``tools/mcp_tool_handlers._call_tool_racing_stdio_death`` 和 ``mcp.client.session.ClientSession.call_tool``。
+``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` 和 ``mcp.client.session.ClientSession.call_tool``。
 """
 
 import asyncio
@@ -18,9 +24,13 @@ import concurrent.futures
 import contextvars
 import logging
 import os
+import threading
 from urllib.parse import urlsplit
 
 import httpx
+
+from .locale import language
+from .texts import CHAIN_BUSY, CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_SELF, CHAIN_STOPPED
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +39,11 @@ SESSION = "wonton-session"
 BOT_TOKEN = "X-Wonton-Bot-Token"
 ORIGIN = "app.wonton/origin"
 
-# 工具处理器在别的线程跑，提交时上游会复制 contextvars，所以钩子在这里 set 的值处理器看得到。
+# 报链开始的超时：pre_llm_call 钩子要在这里面拿到准信，才决定这一轮做不做。
+START_TIMEOUT = 5.0
+# 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用。
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
-# 报链在后台单线程顺序发：钩子跑在网关事件循环里，同步请求会把所有会话卡住；单线程保证 start 先于 end。
+# 报链结束走后台单线程：钩子在网关事件循环里，同步请求会把所有会话卡住。
 _CHAIN_POSTS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="wonton-chain")
 
 _S = {
@@ -40,7 +52,9 @@ _S = {
     "session_store": None,
     "origins": {},   # 会话 id -> {sender, session_key, room, thread, event_id}
     "pending": {},   # 会话键 -> 同上，会话 id 这时还没有
-    "tokens": {},    # 会话 id -> contextvar 的 reset 凭据
+    "active": {},    # 会话 id -> 准了的这一轮的 {sender, session, room, thread}
+    "reported": set(),  # 这一轮已经报过链开始的会话 id
+    "ending": set(),    # 结束时要报 End 的会话 id（准了和被拒的都要报）
     "worker": None,
     "warned": False,
 }
@@ -67,6 +81,19 @@ def _bot_token():
 
 def _is_matrix(platform):
     return str(getattr(platform, "value", platform) or "").lower() == "matrix"
+
+
+def _session_var(name):
+    """会话环境里的一项：网关按这一轮绑定，工具处理器所在的 Agent 线程看得到。"""
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return os.environ.get(name, "")
+    return get_session_env(name)
+
+
+def _session_id():
+    return _session_var("HERMES_SESSION_ID")
 
 
 def _runner():
@@ -115,6 +142,7 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
     }
     if sid:
         _S["origins"][sid] = found
+        _S["reported"].discard(sid)
     if session_key:
         _S["pending"][session_key] = found
     _start_worker()
@@ -152,21 +180,28 @@ def _origin(session_id):
     return found
 
 
-def pre_llm_call(session_id="", sender_id="", **_):
-    """把这一轮的身份放进 contextvar，报链开始。一条消息内每次模型调用都过这里，链只报一次。"""
-    origin = _origin(session_id) or {}
-    sender = sender_id or origin.get("sender")
-    if not sender:
+def _identity(session_id):
+    """这一轮替谁说话：报链准了用准了的那份，没报上时退回记下的来源。"""
+    active = _S["active"].get(session_id)
+    if active is not None:
+        return active
+    origin = _S["origins"].get(session_id)
+    if origin is None or not origin.get("sender"):
         return None
-    if session_id in _S["tokens"] and not origin.get("fresh"):
-        return None
-    current = {
-        "sender": sender,
+    return {
+        "sender": origin["sender"],
         "session": session_id,
         "room": origin.get("room"),
         "thread": origin.get("thread"),
     }
-    _S["tokens"][session_id] = _CURRENT.set(current)
+
+
+def pre_llm_call(session_id="", sender_id="", **_):
+    """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
+    origin = _origin(session_id) or {}
+    sender = sender_id or origin.get("sender")
+    if not sender or not origin.get("room") or session_id in _S["reported"]:
+        return None
     body = {
         "phase": "start",
         "session": session_id,
@@ -176,38 +211,121 @@ def pre_llm_call(session_id="", sender_id="", **_):
     }
     if origin.get("thread"):
         body["thread"] = origin["thread"]
-    _post_chain(body)
+    verdict, refusal, detail = _chain_start(body)
+    if verdict == "retry":
+        return None
+    _S["reported"].add(session_id)
     origin["fresh"] = False
-    return None
+    if verdict == "grant":
+        _S["active"][session_id] = {
+            "sender": sender,
+            "session": session_id,
+            "room": origin.get("room"),
+            "thread": origin.get("thread"),
+        }
+        _S["ending"].add(session_id)
+        return None
+    if verdict == "stopped":
+        return {"action": "block", "message": CHAIN_STOPPED[_language(sender)]}
+    # 其他拒绝：链没开成，也要报 End，让核心把这轮放掉。
+    _S["ending"].add(session_id)
+    logger.info("核心不收这一轮（%r）：%s", refusal, detail)
+    return {"action": "block", "message": _refusal_text(refusal, sender)}
 
 
-def on_session_end(session_id="", interrupted=False, **_):
-    """这一轮结束：清身份，报链结束。"""
-    token = _S["tokens"].pop(session_id, None)
-    if token is not None:
+def _language(sender):
+    """说话人的语言；问不到时英文。钩子跑在单独的线程里，那里没有事件循环。"""
+    coro = language(sender)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
         try:
-            _CURRENT.reset(token)
-        except ValueError:
-            _CURRENT.set(None)
+            return asyncio.run(coro)
+        except Exception as exc:
+            logger.debug("取语言失败，按英文回：%r", exc)
+            return "en"
+    # 调用线程里已经有事件循环（钩子改成在循环里跑也照常）：借一次性线程跑完再等。
+    box = {}
+
+    def run():
+        try:
+            box["lang"] = asyncio.run(coro)
+        except Exception as exc:
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in box:
+        logger.debug("取语言失败，按英文回：%r", box["error"])
+        return "en"
+    return box["lang"]
+
+
+def _refusal_text(refusal, sender):
+    """核心的拒绝类别换成给说话人看的一句话。"""
+    lang = _language(sender)
+    kind = refusal.get("type")
+    if kind == "permission_denied":
+        return CHAIN_DENIED[lang]
+    if kind == "busy":
+        return CHAIN_BUSY[lang]
+    if kind == "invalid_input":
+        return CHAIN_SELF[lang] if refusal.get("refusal") == "self_call" else CHAIN_LOOP[lang]
+    return CHAIN_LIMIT[lang]
+
+
+def on_session_end(session_id="", **_):
+    """这一轮结束：清身份，报过的链报结束。"""
+    _S["active"].pop(session_id, None)
+    _S["reported"].discard(session_id)
     origin = _S["origins"].pop(session_id, None) or {}
     _S["pending"].pop(origin.get("session_key"), None)
-    if token is not None:
+    if session_id in _S["ending"]:
+        _S["ending"].discard(session_id)
         _post_chain({"phase": "end", "session": session_id})
 
 
+def _chain_start(body):
+    """同步报链开始，返回 ``(结论, 拒绝体, 核心的说明)``。
+
+    结论是 ``grant``（准了）、``stopped``、``refused``，或者 ``retry``（没拿到准信，下一次模型调用再报）。
+    """
+    core, token = _core()
+    bot = _bot_token()
+    if not core or not token or not bot:
+        return "retry", {}, ""
+    try:
+        response = httpx.post(f"{core}/agent/chains/{token}", json=body,
+                              headers={BOT_TOKEN: bot}, timeout=START_TIMEOUT, trust_env=False)
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("报链开始失败，下一次模型调用再报：%r", exc)
+        return "retry", {}, ""
+    detail = response.headers.get("X-Wonton-Detail", "")
+    if response.is_success:
+        return "grant", {}, detail
+    try:
+        refusal = response.json()
+    except ValueError:
+        refusal = None
+    if not isinstance(refusal, dict) or not refusal.get("type"):
+        logger.warning("报链开始被拒（%s），原因没认出来：%s", response.status_code, detail)
+        return "retry", {}, detail
+    return ("stopped" if refusal["type"] == "stopped" else "refused"), refusal, detail
+
+
 def _post_chain(body):
-    """排队 POST 一轮的开始/结束；失败只记日志，不挡对话。"""
+    """排队 POST 一轮的结束；失败只记日志。"""
     core, token = _core()
     bot = _bot_token()
     if not core or not token or not bot:
         return
-    url = f"{core}/mcp/{token}/agent/chains"
-    _CHAIN_POSTS.submit(_chain_request, url, body, bot)
+    _CHAIN_POSTS.submit(_chain_request, f"{core}/agent/chains/{token}", body, bot)
 
 
 def _chain_request(url, body, bot):
     try:
-        response = httpx.post(url, json=body, headers={BOT_TOKEN: bot}, timeout=5, trust_env=False)
+        response = httpx.post(url, json=body, headers={BOT_TOKEN: bot}, timeout=START_TIMEOUT, trust_env=False)
         response.raise_for_status()
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("报调用链 %s 失败：%r", body.get("phase"), exc)
@@ -234,10 +352,15 @@ def _install_headers():
         return
 
     async def call(server, *args, **kwargs):
-        turn = _CURRENT.get()
-        if turn:
-            _patch_session(server.session)
-        return await original(server, *args, **kwargs)
+        turn = _identity(_session_id())
+        if turn is None:
+            return await original(server, *args, **kwargs)
+        _patch_session(server.session)
+        token = _CURRENT.set(turn)
+        try:
+            return await original(server, *args, **kwargs)
+        finally:
+            _CURRENT.reset(token)
 
     call._wonton_turn = True
     mcp_tool_handlers._call_tool_racing_stdio_death = call
@@ -316,7 +439,7 @@ async def _poll_outbox(client=None):
     if client is None:
         async with httpx.AsyncClient(timeout=40, trust_env=False) as own:
             return await _poll_outbox(own)
-    response = await client.get(f"{core}/mcp/{token}/agent/outbox", headers={BOT_TOKEN: bot})
+    response = await client.get(f"{core}/agent/outbox/{token}", headers={BOT_TOKEN: bot})
     response.raise_for_status()
     return response.json()
 
@@ -329,8 +452,9 @@ async def _receipt(item_id, result, client=None):
     if client is None:
         async with httpx.AsyncClient(timeout=5, trust_env=False) as own:
             return await _receipt(item_id, result, own)
-    await client.post(f"{core}/mcp/{token}/agent/outbox", timeout=5,
-                      json={"id": item_id, "result": result}, headers={BOT_TOKEN: bot})
+    response = await client.post(f"{core}/agent/outbox/{token}", timeout=5,
+                                 json={"id": item_id, "result": result}, headers={BOT_TOKEN: bot})
+    response.raise_for_status()
 
 
 async def _do_outbox(item, client=None):
