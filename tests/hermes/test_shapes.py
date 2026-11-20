@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))
 
 
 # 其他测试用同名假模块顶掉这些上游包；真模块导进来前要连根摘掉，导完放回去。
-FAKE_ROOTS = ("mautrix", "tools", "gateway", "hermes_cli", "mcp")
+FAKE_ROOTS = ("mautrix", "tools", "gateway", "hermes_cli", "mcp", "agent")
 
 
 def _real(name):
@@ -82,10 +82,11 @@ class ShapeCase(unittest.TestCase):
     def test_the_mcp_session_double_matches_the_real_session(self):
         from tests.test_turn import Session
 
-        real = _real("mcp.client.session").ClientSession
-        self.assertEqual(
-            _params(Session._resolve_param_headers), _params(real._resolve_param_headers)
-        )
+        module = _real("mcp.client.session")
+        # 真会话的 _stamp 是实例属性（预连接时是 _preconnect_stamp），替身按同样的（data, opts）收。
+        self.assertEqual(_params(Session._stamp)[1:], _params(module._preconnect_stamp))
+        self.assertEqual(_params(Session.adopt), _params(module.ClientSession.adopt))
+        real = module.ClientSession
         # 替身的 call_tool 要把核心的 meta 和 progress_callback 都收下转给上游。
         real_params = inspect.signature(real.call_tool).parameters
         self.assertIn("meta", real_params)
