@@ -19,8 +19,9 @@ services:
       - /bin/sh
       - -c
       - >-
-        mkdir -p /opt/data/plugins/wonton/locales /opt/data/hooks/wonton-language /opt/data/skills/wonton-help &&
+        mkdir -p /opt/data/plugins/wonton/locales /opt/data/plugins/wonton/dashboard /opt/data/hooks/wonton-language /opt/data/skills/wonton-help &&
         cp /seed/wonton/plugin.yaml /seed/wonton/*.py /opt/data/plugins/wonton/ &&
+        cp /seed/wonton/dashboard/* /opt/data/plugins/wonton/dashboard/ &&
         cp /seed/wonton/locales/*.yaml /opt/data/plugins/wonton/locales/ &&
         cp /seed/wonton-language/HOOK.yaml /seed/wonton-language/handler.py /opt/data/hooks/wonton-language/ &&
         cp /seed/skills/wonton-help/SKILL.md /opt/data/skills/wonton-help/ &&
@@ -58,6 +59,12 @@ services:
         target: /seed/wonton/commands.py
       - source: wonton_turn
         target: /seed/wonton/turn.py
+      - source: wonton_pages
+        target: /seed/wonton/pages.py
+      - source: wonton_dashboard_api
+        target: /seed/wonton/dashboard/api.py
+      - source: wonton_dashboard_manifest
+        target: /seed/wonton/dashboard/manifest.json
       - source: wonton_texts
         target: /seed/wonton/texts.py
       - source: wonton_locale
@@ -190,6 +197,12 @@ configs:
     file: ./wonton/commands.py
   wonton_turn:
     file: ./wonton/turn.py
+  wonton_pages:
+    file: ./wonton/pages.py
+  wonton_dashboard_api:
+    file: ./wonton/dashboard/api.py
+  wonton_dashboard_manifest:
+    file: ./wonton/dashboard/manifest.json
   wonton_texts:
     file: ./wonton/texts.py
   wonton_locale:
@@ -216,7 +229,7 @@ configs:
 x-wonton:
   spec: "0.12"
   id: com.nousresearch.hermes
-  version: 0.7.7
+  version: 0.7.8
   kind: agent
   title: { zh: AI 管家（Hermes）, en: All-Purpose Bot (Hermes) }
   description:
@@ -248,7 +261,7 @@ x-wonton:
   release_notes:
     zh: "修好了停链、发私聊和认人：在 App 里停链能马上打断手头的事，批准过的私聊会真的发出去，别人派活过来时它知道是谁。链到上限或者已经停了时，会回一句话说清原因。"
     zh-Hant: "修好了停鏈、發私聊和認人：在 App 裡停鏈能馬上打斷手頭的事，批准過的私聊會真的發出去，別人派活過來時它知道是誰。鏈到上限或者已經停了時，會回一句話說清原因。"
-    en: "Fixed stopping, sending and knowing who is talking: stopping a chain in the app now interrupts what it is doing, approved direct messages really go out, and it knows who sent work down a chain. When a chain is at its limit or has been stopped, it answers with a short line saying why."
+    en: "Fixed stopping, sending and knowing who is talking: stopping a chain in the app now interrupts what it is doing, approved direct messages really go out, and it knows who sent work down a chain. When a chain is at its limit or has been stopped, it answers with a short line saying why. In the web console it now talks as whoever opened the page instead of staying read-only."
     ja: "停止・送信・相手の識別を直しました。アプリでチェーンを止めると作業がすぐ中断され、承認済みの DM は実際に送られ、チェーンで仕事を回してきた相手も分かります。上限や停止のときは理由を一言返します。"
   agent:
     protocol: matrix

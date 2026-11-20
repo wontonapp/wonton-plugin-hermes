@@ -2,8 +2,7 @@
 
 云吞核心靠请求头知道 MCP 工具调用替谁说话、属于哪一轮：``X-Wonton-On-Behalf-Of`` 是说话人，
 ``wonton-session`` 是这一轮的会话，``app.wonton/origin`` 的 ``_meta`` 给房间和话题。Hermes 的 MCP
-客户端每轮不带这些，所以在工具处理器的调用上加；值来自工具调用自己 context 的
-``HERMES_SESSION_ID``（见下）。
+客户端每轮不带这些，所以在工具处理器的调用上加；值来自这一轮自己设的轮次上下文（见下）。
 
 开轮时向核心报链（``POST <核心>/agent/chains/<令牌>``，带 Bot 的 Matrix 令牌），核心按说话人验证，
 被拒时这一轮就以那条原因结束、不再推理；结束报 ``End``。核心停链时往出箱
@@ -14,8 +13,13 @@
 身份靠工具调用自己 context 里的 ``HERMES_SESSION_ID``：上游在 Agent 线程的 context 里按这一轮绑好它，
 MCP 的工具线程拷着那份 context 跑，所以拿到的是这一轮自己的会话号，同时几轮也不会串。
 ``pre_llm_call`` 在别的线程、拷的上下文里跑，它设的 contextvar 回不到工具线程（0.22.7 实测 3/3 次工具调用
-都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 和 ``_S["origins"]`` 两张表，不靠“最近一轮”的进程级值。
-只有会话号时带 ``wonton-session``、不带代表头，让核心按会话去认；连会话号也取不到才不带身份。
+都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 这张表，不靠“最近一轮”的进程级值。
+查不到就不带身份。
+
+定时任务跑的时候没有人当场说话，会话环境里也只有 Hermes 自己生成的 cron 会话号，``_identity`` 查不到；
+这时按插件上下文的 ``current_cron_execution()`` 认出手上的任务，读它的 origin 当说话人（见 ``_cron_identity``）。
+委派出去的子代理里上游让它返回 None，改读上游自己的执行标记，子代理同样替创建者说话。
+定时任务是上游从 cron 直接进 Agent 的，没有网关消息，所以工具处理器也在 ``pre_llm_call`` 里包。
 
 定时任务跑的时候没有人当场说话，会话环境里也只有 Hermes 自己生成的 cron 会话号，``_identity`` 查不到；
 这时按插件上下文的 ``current_cron_execution()`` 认出手上的任务，读它的 origin 当说话人（见 ``_cron_identity``）。
@@ -47,6 +51,11 @@ from .texts import CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_OTHER, CHAIN_SEL
 
 logger = logging.getLogger(__name__)
 
+try:
+    import gateway.session_context as _session_context
+except Exception:  # 上游老版本没有它：只认环境变量
+    _session_context = None
+
 ON_BEHALF_OF = "X-Wonton-On-Behalf-Of"
 SESSION = "wonton-session"
 BOT_TOKEN = "X-Wonton-Bot-Token"
@@ -59,6 +68,8 @@ REFRESH_TIMEOUT = 10.0
 # 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用：仍然是个 contextvar，但在
 # 每次调用自己的任务里 set，值跟着任务走，不看进程里最近是哪一轮。
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
+# 这一轮替谁说话：`pre_llm_call` 拿到准的会话号时在轮次的任务里设，工具调用和它同一条任务。
+# 会话环境里的会话号是 Agent 构造时写的，换一轮可能还没刷新，两条会话交错时会串号。
 # 报链结束走后台单线程：钩子在网关事件循环里，同步请求会把所有会话卡住。
 _CHAIN_POSTS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="wonton-chain")
 
@@ -81,6 +92,9 @@ _S = {
     "warned_list": False,
     "warned_marker": False,
     "worker": None,
+    "webs": {},      # 会话 id -> 刚提交这条会话的网页连接（见 pages.py）
+    "server": None,  # 上游会话表所在的模块，由 pages 装上（gateway 是网关本身，不是它）
+    "page_warned": set(),  # 已经报过“上游会话表换了形状”的会话 id
     "warned": False,
 }
 
@@ -90,6 +104,7 @@ def register(ctx):
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", pre_llm_call)
     ctx.register_hook("on_session_end", on_session_end)
+    ctx.register_hook("on_session_reset", on_session_reset)
 
 
 def _core():
@@ -110,17 +125,13 @@ def _is_matrix(platform):
 
 
 def _session_var(name):
-    """会话环境里的一项。
+    """会话环境里的一项：网关按这一轮绑定，工具处理器所在的 Agent 线程看得到。
 
-    上游把它存在 contextvar 里，网关按这一轮在 Agent 线程的 context 里绑定，MCP 的工具线程拷着那份
-    context 跑，所以看到的是这一轮自己的值。这一份 context 里从没绑过时（``_UNSET``），上游回落到
-    ``os.environ`` 的旧值；清掉是绑成空串，这时拿到的是空串，不再回落。
+    `sys.modules` 里换过模块以后也读得到当前的那份；模块搬走时回落到 import 时抓到的那份。
     """
-    try:
-        from gateway.session_context import get_session_env
-    except Exception:
-        return os.environ.get(name, "")
-    return get_session_env(name)
+    context = sys.modules.get("gateway.session_context") or _session_context
+    get = getattr(context, "get_session_env", None)
+    return get(name) if get is not None else os.environ.get(name, "")
 
 
 def _session_id():
@@ -172,6 +183,7 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
         "room": room,
         "thread": getattr(source, "thread_id", None) or None,
         "event_id": getattr(event, "message_id", None) or getattr(event, "id", None),
+        "fresh": True,
     }
     if sid:
         _S["origins"][sid] = found
@@ -221,26 +233,144 @@ def _origin(session_id):
 def _identity(session_id):
     """这一轮替谁说话，连同这份身份是哪来的。
 
-    按工具调用自己的会话号查这一轮的来源；说话人取不到时不做猜测，带会话号不带代表头，让核心按会话去认
-    ——猜错了卡片就挂到别人的链上。会话号也没有时返回 None，调用不带身份（核心的审计里看得到）。
-
-    会话结束以后迟到的调用只剩会话号这一支：核心对已结束的会话没有在跑的轮，会退到“封顶最严的轮”，
-    这条会话再开新链之前可能拿到别的说话人，和完全不带会话头一样，不是准的。
+    按工具调用自己的会话号查这一轮的来源；取不到时不做猜测，如实返回 None、调用不带身份（核心的审计里看得到），
+    不拿别的会话去猜——猜错了卡片就挂到别人的链上。
     """
     active = _S["active"].get(session_id)
     if active is not None:
         return active, "会话环境"
     origin = _S["origins"].get(session_id)
-    if origin is not None:
-        return {
-            "sender": origin.get("sender"),
-            "session": session_id,
-            "room": origin.get("room"),
-            "thread": origin.get("thread"),
-        }, "来源记录"
+    if origin is None or not origin.get("sender"):
+        return None, "无"
+    return {
+        "sender": origin["sender"],
+        "session": session_id,
+        "room": origin.get("room"),
+        "thread": origin.get("thread"),
+    }, "来源记录"
+
+
+def note_page():
+    """网页控制台连上来了：出箱轮询和 MCP 头只有网关的入站消息会带上，网页不经过它。"""
+    try:
+        _S["loop"] = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    _install_headers()
+    _start_worker()
+
+
+def attach_gateway(server):
+    """记下上游的会话表模块：网页连接关了要按它认人。网关本身在 ``_S["gateway"]``，两回事。"""
+    _S["server"] = server
+
+
+def note_peer(session_id, transport):
+    """这条连接刚提交（或恢复）了这条会话。谁都记：终端页签最后提交时不该让早先的网页顶上。"""
     if session_id:
-        return {"sender": None, "session": session_id, "room": None, "thread": None}, "只有会话"
-    return None, "无"
+        _S["webs"][session_id] = transport
+    _pages().remember(session_id, transport)
+
+
+def _pages():
+    from . import pages
+
+    return pages
+
+
+def _page_user(transport):
+    """这条连接带的打开者；不是网页连接时 None。"""
+    return _pages().opener_of(transport)
+
+
+def _warn_pages(session_id, reason):
+    """上游形状变了按会话各报一次：同一进程里另一个会话的形状变化还得能看见。"""
+    if session_id in _S["page_warned"]:
+        return None
+    _S["page_warned"].add(session_id)
+    logger.warning("%s，网页连接认不出人（会话 %s）", reason, session_id)
+    return None
+
+
+def _page_sender(session_id):
+    """网页这一轮替谁说话：最后提交这条会话、带着打开者的连接。
+
+    连接在控制台进程里、这一轮在网关进程里跑，提交者从盘上读（``pages.remember`` 写的）。盘上记着却没人
+    （终端页签最后提交的）就不算人。记下的连接已经不在会话里时（关了、被上游拆掉）改由还剩的活连接里最后
+    提交的那条说；没有会话表或一个活连接都没有才退回记录本身。一个带打开者的都没有就不算人，交回上游的
+    ``sender_id``。网页会话没有 Matrix 来源，``pre_gateway_dispatch`` 不来；按轮现取，不缓存到会话。
+    """
+    recorded = _pages().recorded(session_id)
+    server = _S["server"]
+    live = None
+    if server is None:
+        # 没有控制台的进程（定时任务、旧版环境）是常态，不当事故报。
+        logger.debug("没有上游的会话表，网页连接认不出人（会话 %s）", session_id)
+    else:
+        try:
+            live = server._session_live_transports(server._sessions.get(session_id))
+        except AttributeError as exc:
+            _warn_pages(session_id, f"上游的会话表换了形状：{exc!r}")
+    remembered = _S["webs"].get(session_id)
+    stale = (remembered is not None and live is not None
+             and not any(peer is remembered for peer in live)
+             and (recorded is None or _page_user(remembered) == recorded.strip()))
+    if live and stale:
+        for transport in reversed(live):
+            sender = _page_user(transport)
+            if sender:
+                return sender
+    if recorded is not None:
+        return recorded.strip() or None
+    if remembered is not None:
+        return _page_user(remembered)
+    return None
+
+
+def _cron_execution():
+    """手上的定时任务执行，没有时 None。
+
+    先问插件上下文；委派出去的子代理里上游特意让它返回 None（``cron/execution_identity.py``），
+    这时退回读上游自己那份执行标记：子代理跑在委派时拷来的 context 里，标记还在，它替同一件事干活。
+    """
+    ctx = _S["ctx"]
+    execution = ctx.current_cron_execution() if ctx is not None else None
+    if execution is not None:
+        return execution
+    try:
+        from cron.execution_identity import _CURRENT
+
+        return _CURRENT.get()
+    except Exception:
+        return None
+
+
+def _cron_identity():
+    """定时任务（含它委派出去的子代理）调工具时替这条任务的创建者说话。没有定时任务时 None。
+
+    定时任务跑的时候没有人当场说话，`_identity` 查不到；任务的 ``origin`` 记着建任务那一轮的会话环境
+    （上游 ``tools/cronjob_job_args._origin_from_env``），``origin`` 是建任务时从会话环境抄的字符串，
+    A 让 Bot 建的任务就按 A 算，模型在工具子进程里改不了它。
+
+    头是插件自报的，核心只核对“这个 Bot 听不听这个人”（和聊天轮一样）；创建者后来不听这个 Bot 了，
+    核心按认不出算、照旧只读，这里不猜。平台不是正好 ``matrix``、没有创建者、任务没了都不带身份。
+    定时任务没有进行中的轮次，子代理也不是一轮，所以只带代表头，不带 ``wonton-session``。
+    """
+    execution = _cron_execution()
+    if execution is None:
+        return None
+    try:
+        from cron.jobs import get_job
+
+        job = get_job(execution.job_id)
+    except Exception as exc:
+        logger.warning("读定时任务 %s 失败，调用不带身份：%r", execution.job_id, exc)
+        return None
+    origin = (job or {}).get("origin") or {}
+    sender = origin.get("user_id")
+    if not sender or origin.get("platform") != "matrix":
+        return None
+    return {"sender": sender, "room": origin.get("chat_id"), "thread": origin.get("thread_id")}
 
 
 def _cron_execution():
@@ -446,10 +576,13 @@ def pre_llm_call(session_id="", sender_id="", **_):
     """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
     # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
     _install_headers()
-    origin = _origin(session_id) or {}
-    sender = sender_id or origin.get("sender")
+    page = _page_sender(session_id)
+    origin = {} if page else (_origin(session_id) or {})
+    sender = page or sender_id or origin.get("sender")
     _remember_for_listing(session_id, sender)
-    if not sender or not origin.get("room") or session_id in _S["reported"]:
+    if not sender or session_id in _S["reported"]:
+        return None
+    if page is None and not origin.get("room"):
         return None
     body = {
         "phase": "start",
@@ -469,6 +602,7 @@ def pre_llm_call(session_id="", sender_id="", **_):
     if verdict == "retry":
         return None
     _S["reported"].add(session_id)
+    origin["fresh"] = False
     if verdict == "grant":
         _S["active"][session_id] = {
             "sender": sender,
@@ -518,15 +652,13 @@ def _language(sender):
 def _refusal_text(refusal, sender, detail=""):
     """核心的拒绝类别换成给说话人看的一句话。
 
-    类别说不清的地方（``invalid_input`` 没给 refusal、``other`` 什么都可能是）把核心给的说明接在后面。
-    会话挂在别的链上、卡片已登记这类核心错误走的是 ``other``，类型分类只在响应头 ``x-wonton-error``
-    里，插件只读响应体，所以落到下面泛泛的那句。
+    类别说不清的地方（同样的 ``invalid_input`` 既可能是绕圈，也可能是这一轮还挂在别的链上；
+    ``other`` 什么都可能是）把核心给的说明接在后面。
     """
     lang = _language(sender)
     kind = refusal.get("type")
     if kind == "permission_denied":
-        text = CHAIN_DENIED[lang]
-        return f"{text}\n\n{detail}" if detail else text
+        return CHAIN_DENIED[lang]
     if kind == "limit_reached":
         return CHAIN_LIMIT[lang]
     if kind == "invalid_input" and refusal.get("refusal") == "self_call":
@@ -537,13 +669,20 @@ def _refusal_text(refusal, sender, detail=""):
     return f"{text}\n\n{detail}" if detail else text
 
 
+def on_session_reset(session_id=None, old_session_id=None, **_):
+    """会话被重置（``/new`` 等）：旧会话的网页记录没人再读，删掉。"""
+    _pages().forget(old_session_id or session_id)
+
+
 def on_session_end(session_id="", **_):
     """这一轮结束：清身份，报过的链报结束。"""
     if _S["ending"] and session_id not in _S["ending"]:
         logger.warning("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
     _S["active"].pop(session_id, None)
+    _S["webs"].pop(session_id, None)
+    _pages().forget(session_id)
+    _S["page_warned"].discard(session_id)
     _S["unknown"].discard(session_id)
-    _S["unknown"].discard("")
     _S["reported"].discard(session_id)
     origin = _S["origins"].pop(session_id, None) or {}
     _S["pending"].pop(origin.get("session_key"), None)
@@ -733,7 +872,6 @@ def _patch_session(session):
         if turn and "meta" not in kwargs:
             origin = {name: turn[key] for key, name in (("room", "room_id"), ("thread", "thread_id")) if turn.get(key)}
             if origin:
-                # 核心的 origin 要求 room_id；只有会话号时塞空的 {} 反而解析不了，不带。
                 kwargs["meta"] = {ORIGIN: origin}
         return await original_call(name, arguments, *args, **kwargs)
 
@@ -804,16 +942,6 @@ async def _receipt(item_id, result, client=None):
     response.raise_for_status()
 
 
-def _release_slot(runner, session_key):
-    """打断这一轮但不依赖它的清会话钩子：只放槽，走在跑的上游驱逐同一对调用。"""
-    generation = runner._interrupt_running_turn(
-        session_key,
-        interrupt_reason="云吞停链",
-        invalidation_reason="wonton_chain_stopped",
-    )
-    runner._drop_turn_slot(session_key, run_generation=generation)
-
-
 async def _do_outbox(item, client=None):
     item_id = item.get("id")
     kind = item.get("kind") or {}
@@ -825,24 +953,21 @@ async def _do_outbox(item, client=None):
         runner = _runner()
         if session_key and runner is not None:
             clear = getattr(runner, "_interrupt_and_clear_session", None)
-            try:
-                if clear is not None and source is not None:
-                    # 和 /stop 走同一条路：光打断不停用那一轮的槽，槽一直占着，之后的消息全被当成“忙”排队，没人放。
-                    await clear(
-                        session_key,
-                        source,
-                        interrupt_reason="云吞停链",
-                        invalidation_reason="wonton_chain_stopped",
-                    )
-                else:
-                    _release_slot(runner, session_key)
-            except Exception as exc:
-                # 清会话时抛了异常也要把槽放掉；核心不重发 CancelTurn，槽占着就再也轮不到这一会话。
-                logger.warning("停链时清会话失败 %s：%r", session, exc)
-                try:
-                    _release_slot(runner, session_key)
-                except Exception as slot_exc:
-                    logger.warning("停链时放轮次槽也失败 %s：%r", session, slot_exc)
+            if clear is not None and source is not None:
+                # 和 /stop 走同一条路：光打断不停用那一轮的槽，槽一直占着，之后的消息全被当成“忙”排队，没人放。
+                await clear(
+                    session_key,
+                    source,
+                    interrupt_reason="云吞停链",
+                    invalidation_reason="wonton_chain_stopped",
+                )
+            else:
+                generation = runner._interrupt_running_turn(
+                    session_key,
+                    interrupt_reason="云吞停链",
+                    invalidation_reason="wonton_chain_stopped",
+                )
+                runner._drop_turn_slot(session_key, run_generation=generation)
             await _receipt(item_id, {"result": "sent", "event_id": ""}, client)
         else:
             await _receipt(item_id, {"result": "failed", "category": "other"}, client)

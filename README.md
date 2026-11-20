@@ -71,6 +71,16 @@ Channels 保存凭据到该 Bot 的 `.env`；“Restart to apply” 调用 `herm
 
 Telegram 显式使用核心注入的 `WONTON_PROXY_URL`；未配代理时为空，走直连。Telegram 的凭据和白名单留在 Hermes 原生页面，不增加插件设置字段。没有真实 IM 凭据时只能验证错误反馈，不能据此声称真实渠道已连通。
 
+### 网页控制台里的说话人
+
+插件网页就是 Hermes 原生控制台。在云吞 App 里打开它的人，在控制台对话里说话时按这个人的 Matrix 用户 ID 记，
+不再是只能看的回放。核心把插件网页转给 Hermes 之前，在升级请求上写 `X-Wonton-Web-User`（登录人的 Matrix 用户 ID），
+转发前先剥掉浏览器自己带的同名头，所以插件只认头、不验签。开在 App 里的终端页签走内部凭据，没有这条头，照旧按只读。
+
+没有头时插件照原样启动、控制台仍可读；头带着但值不是 Matrix 用户 ID 时上游会把整轮拒掉，错误进 Hermes 的日志。
+认可的是上游内部结构（`WSTransport` 的构造、`server._rebind_live_transport`），`tests/hermes/test_upstream.py` 钉在
+镜像 0.22.7 上：换版本先跑它。
+
 ## 国内 IM 渠道
 
 飞书、钉钉、企业微信（智能机器人）、QQ（官方机器人）、个人微信五个渠道，每个渠道在插件详情页的「设置」里一个开关，
