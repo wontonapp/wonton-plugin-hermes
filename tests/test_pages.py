@@ -3,7 +3,10 @@
 上游替身见 ``tui_fake``，真形状在 ``tests/hermes`` 里跑。
 """
 
+import asyncio
+import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -37,9 +40,20 @@ def connect(opener=None, sid=SID, **kwargs):
     return transport
 
 
+def isolate_home(case):
+    """每个用例一个空的 ``HERMES_HOME``：记录落在那儿，不串。"""
+    home = tempfile.TemporaryDirectory()
+    case.addCleanup(home.cleanup)
+    env = mock.patch.dict(os.environ, {"HERMES_HOME": home.name})
+    env.start()
+    case.addCleanup(env.stop)
+    return Path(home.name)
+
+
 class WebIdentityCase(unittest.TestCase):
     def setUp(self):
         self.upstream = reset()
+        isolate_home(self)
 
     def test_the_opener_becomes_the_identity_and_the_rest_stays(self):
         transport = connect(MOM)
@@ -70,10 +84,10 @@ class WebIdentityCase(unittest.TestCase):
         self.assertEqual(turn._page_sender(SID), MOM)
         self.assertEqual(mom.auth_identity["user_id"], MOM)
 
-    def test_a_page_that_closed_is_not_used(self):
+    def test_a_page_that_closed_still_speaks_for_its_session(self):
         mom = connect(MOM)
         mom.close()
-        self.assertIsNone(turn._page_sender(SID))
+        self.assertEqual(turn._page_sender(SID), MOM)
 
     def test_a_closed_page_hands_over_to_the_one_still_open(self):
         mom = connect(MOM)
@@ -144,3 +158,66 @@ class WebIdentityCase(unittest.TestCase):
         finally:
             sys.modules.pop("tui_gateway.ws", None)
             sys.modules["tui_gateway.ws"] = ws
+
+
+HERE = Path(__file__).resolve().parent
+
+
+class PageFilesCase(unittest.TestCase):
+    """控制台和网关不是一个进程，打开者只能落在 ``HERMES_HOME`` 下的文件里交接。"""
+
+    def setUp(self):
+        self.upstream = reset()
+        self.home = isolate_home(self)
+
+    def note(self, opener, sid=SID):
+        opener_for = self.upstream.ws.WSTransport(tui_fake.WS(opener), None, auth_identity=dict(GATEWAY))
+        return opener_for
+
+    def test_a_frame_carries_the_session_the_page_serves(self):
+        page = self.note(MOM)
+        page.write({"method": "event", "params": {"type": "session.info", "session_id": SID}})
+        self.assertEqual(pages.recorded(SID), MOM)
+        self.assertEqual(turn._page_sender(SID), MOM)
+
+    def test_the_pty_connection_records_the_page_on_the_active_session(self):
+        path = self.home / "active.json"
+        session = tui_fake.PTY(SID, path)
+        session.input.append(b"x")
+        asyncio.run(tui_fake.chat()._pump_keepalive_input(tui_fake.WS(MOM), session))
+        self.assertEqual(session.written, [b"x"])
+        self.assertEqual(pages.recorded(SID), MOM)
+
+    def test_one_record_per_connection_and_session(self):
+        path = self.home / "active.json"
+        session = tui_fake.PTY(SID, path)
+        session.input.extend([b"a", b"b"])
+        with mock.patch.object(pages, "remember_user", wraps=pages.remember_user) as remember:
+            asyncio.run(tui_fake.chat()._pump_keepalive_input(tui_fake.WS(MOM), session))
+        self.assertEqual(remember.call_count, 1)
+
+    def test_the_record_speaks_even_with_another_page_open(self):
+        connect(OWNER)
+        pages.remember_user(SID, MOM)
+        self.assertEqual(turn._page_sender(SID), MOM)
+
+    def test_a_record_without_an_opener_is_nobody(self):
+        pages.remember_user(SID, "")
+        self.assertIsNone(turn._page_sender(SID))
+
+    def test_a_terminal_connection_does_not_overwrite_the_page(self):
+        pages.remember_user(SID, MOM)
+        pages.remember(SID, tui_fake.Transport("tui"))
+        self.assertEqual(pages.recorded(SID), MOM)
+
+    def test_the_end_forgets_the_session(self):
+        pages.remember_user(SID, MOM)
+        turn.on_session_end(session_id=SID)
+        self.assertIsNone(pages.recorded(SID))
+
+    def test_a_page_after_the_end_records_again(self):
+        pages.remember_user(SID, MOM)
+        turn.on_session_end(session_id=SID)
+        page = self.note(MOM)
+        page.write({"params": {"type": "message.start", "session_id": SID}})
+        self.assertEqual(pages.recorded(SID), MOM)

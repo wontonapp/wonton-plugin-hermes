@@ -82,8 +82,10 @@ Telegram 显式使用核心注入的 `WONTON_PROXY_URL`；未配代理时为空�
 镜像 0.22.7 上：换版本先跑它。
 
 网页后端只在 `plugins.enabled` 里有 `wonton` 时才会被 Hermes 载入：`init_config.py` 每次建容器都补回这一项并从
-`plugins.disabled` 撤掉。控制台的连接是普通的登录连接（`provider: local`，没有 `native_bootstrap`），换代身份时
-`profile_id`/`instance_id` 等字段原样保留，App 的终端页签和桌面控制通道不受影响。
+`plugins.disabled` 撤掉。老安装缺这一项时 Hermes 整个网页后端不载入，控制台打不开——升级或重装（任一次建容器）就会补上，
+仍然打不开时看 `$HERMES_HOME/config.yaml` 的 `plugins.enabled` 里有没有 `wonton`、或者 `plugins.disabled` 里有没有它。
+控制台的连接是普通的登录连接（`provider: local`，没有 `native_bootstrap`），换代身份时 `profile_id`/`instance_id`
+等字段原样保留，App 的终端页签和桌面控制通道不受影响。
 
 ## 国内 IM 渠道
 

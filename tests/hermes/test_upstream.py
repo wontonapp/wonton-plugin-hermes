@@ -1,4 +1,5 @@
-"""钉住依赖的上游形状（Hermes 0.22.7）：控制台的 WebSocket 入口、身份传到连接类、会话表里认得住来源。
+"""钉住依赖的上游形状（Hermes 0.22.7）：控制台的 WebSocket 入口、身份传到连接类、会话表里认得住来源，
+以及终端那条连接替哪个会话收键、身份怎么落在连接上。
 
 镜像自己记着版本（``/opt/hermes/install-stamp.json``）。版本一变先来这里看：``wonton/pages.py`` 认的就是
 这几处，形状对不上时要改它。
@@ -11,6 +12,7 @@ import types
 import unittest
 from pathlib import Path
 
+from hermes_cli import pty_session
 from hermes_cli.web_routers import chat_ws
 from tui_gateway import server, session_lifecycle, session_reaper, session_transports, ws
 
@@ -80,3 +82,20 @@ class UpstreamCase(unittest.TestCase):
         self.assertIn("_transport_is_live_peer",
                       inspect.getsource(server._session_live_transports))
         self.assertIn("_closed", inspect.getsource(session_reaper._transport_is_dead))
+
+    def test_the_terminal_socket_tells_which_session_the_page_keeps(self):
+        self.assertIn("/api/pty", [route.path for route in chat_ws.router.routes])
+        self.assertEqual(params(chat_ws._pump_keepalive_input), ["ws", "session"])
+        self.assertIn("session.write(ws, raw)", inspect.getsource(chat_ws._pump_keepalive_input))
+        self.assertIn("active_session_cleanup", inspect.getsource(pty_session.PtySession))
+
+    def test_the_session_knows_its_active_session_file(self):
+        self.assertIn("active_session_file", params(pty_session.PtySession.__init__))
+        marker = inspect.getsource(chat_ws._pty_channel_marker_state)
+        self.assertIn("_active_session_file_for_channel", marker)
+        read = inspect.getsource(chat_ws._read_active_session_file)
+        self.assertIn("session_id", read)
+
+    def test_the_transport_can_tell_us_the_session_of_a_frame(self):
+        self.assertEqual(params(ws.WSTransport.write), ["self", "obj"])
+        self.assertEqual(params(ws.WSTransport.write_async), ["self", "obj"])

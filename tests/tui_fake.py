@@ -29,6 +29,14 @@ class WSTransport(Transport):
         self.loop = loop
         self.peer = peer
         self.auth_identity = auth_identity
+        self.frames = []
+
+    def write(self, obj):
+        self.frames.append(obj)
+        return True
+
+    async def write_async(self, obj):
+        return self.write(obj)
 
 
 class FanoutTransport:
@@ -116,6 +124,25 @@ def wire():
     server._session_live_transports = live_transports
     server._rebind_live_transport = rebind  # 调用方走的是 server 上这份，和上游 rebind 后的情形一样
 
+    chat = types.ModuleType("hermes_cli.web_routers.chat_ws")
+
+    async def pump(ws, session):
+        """照上游：把客户端发来的每段原样交给 ``session.write``。"""
+        while True:
+            raw = await session.receive()
+            if raw is None:
+                return
+            if not await session.write(ws, raw):
+                return
+
+    pump.pump = pump
+    chat._pump_keepalive_input = pump
+
+    web = types.ModuleType("hermes_cli.web_routers")
+    web.chat_ws = chat
+    cli = types.ModuleType("hermes_cli")
+    cli.web_routers = web
+
     gateway = types.ModuleType("tui_gateway")
     gateway.pw = pw
     gateway.ws = ws
@@ -129,6 +156,9 @@ def wire():
         "tui_gateway.session_lifecycle": life,
         "tui_gateway.session_transports": tr,
         "tui_gateway.server": server,
+        "hermes_cli": cli,
+        "hermes_cli.web_routers": web,
+        "hermes_cli.web_routers.chat_ws": chat,
     }.items():
         sys.modules[name] = module
     _installed = True
@@ -137,6 +167,10 @@ def wire():
 
 def modules():
     return sys.modules["tui_gateway"]
+
+
+def chat():
+    return sys.modules["hermes_cli.web_routers.chat_ws"]
 
 
 def install(turn):
@@ -148,3 +182,20 @@ def install(turn):
 
 def session(sid):
     return sessions.setdefault(sid, {"session_id": sid, "transport": None})
+
+
+class PTY:
+    """``/chat`` 那条终端连接：上游带 ``active_session_file`` 的会话对象，收到什么都交给 ``write``。"""
+
+    def __init__(self, sid, path):
+        self.active_session_file = path
+        self.written = []
+        self.input = []
+        (path).write_text('{"session_id": "%s"}' % sid, encoding="utf-8")
+
+    async def receive(self):
+        return self.input.pop(0) if self.input else None
+
+    async def write(self, ws, raw):
+        self.written.append(raw)
+        return True
