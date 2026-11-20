@@ -267,6 +267,13 @@ if declare -F before_install >/dev/null; then
   before_install >>"$LOG" 2>&1 || { fail 装得上 "before_install 失败，看 $LOG"; exit 0; }
 fi
 
+# 核心随包预装了默认 Agent：up 之后它已经装着，核心拒绝用 install 覆盖已装的插件（依赖连接也还没建好）。
+# 先卸掉（数据留着），下面的安装才走正常路径。
+if probes_dev status 2>/dev/null | grep -qF "$PROBES_PLUGIN_ID"; then
+  say "卸掉预装的 $PROBES_PLUGIN_ID（数据留着）"
+  probes_dev uninstall >>"$LOG" 2>&1 || { fail 装得上 "卸载预装的插件失败，看 $LOG"; exit 0; }
+fi
+
 # 数据：先装升级起点（有 tag 时）写一条数据，再装工作区版本验证升级不丢；重装同理。
 data_wrote=0
 data_upgrade_base=0

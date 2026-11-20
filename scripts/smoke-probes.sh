@@ -272,3 +272,21 @@ hermes_check_tuwunel_outage() {
   fi
   rm -f "$file"
 }
+
+# 数据钩子：往 Bot 的数据卷里写一行，重装以后还在才算数据保住了（卷名按 Bot 固定，重装不动它）。
+data_write() {
+  local c marker
+  c="$(hermes_gateway)" || { echo "找不到 gateway 容器"; return 1; }
+  marker="wonton-smoke-$(tr -dc a-z0-9 </dev/urandom | head -c 12)"
+  printf '%s' "$marker" | docker exec -i "$c" sh -c 'cat > /opt/data/.smoke-data' ||
+    { echo "写不进 /opt/data/.smoke-data"; return 1; }
+  printf '%s' "$marker" >"$SMOKE_STATE" || { echo "写不进标记文件 $SMOKE_STATE"; return 1; }
+}
+
+data_check() {
+  local c want got
+  c="$(hermes_gateway)" || { echo "找不到 gateway 容器"; return 1; }
+  want="$(cat "$SMOKE_STATE")"
+  got="$(docker exec "$c" cat /opt/data/.smoke-data 2>/dev/null)" || { echo "读不到 /opt/data/.smoke-data"; return 1; }
+  [[ "$got" == "$want" ]] || { echo "读回来的不一样：$got"; return 1; }
+}
