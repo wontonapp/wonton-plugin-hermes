@@ -113,10 +113,11 @@ hermes_check_native_restart() {
   printf '%s\n' "$out"
 }
 
-# 核心重启：升级、崩溃、手动重启核心都会这样，Bot 的同步要自己接上。核心在恢复插件、问不到 Tuwunel 期间
-# 要答可重试的 503（答 403 上游就停掉同步，进程还活着、健康还绿，只有重启网关才好），重启完私聊照样通。
+# 核心重启：升级、崩溃、手动重启核心都会这样，Bot 的同步和工具调用都要自己接上。核心在恢复插件、问不到 Tuwunel
+# 期间要答可重试的 503（答 403 上游就停掉同步、把 MCP 服务器整轮停下，进程还活着、健康还绿，只有重启网关才好），
+# 重启完私聊照样通、经总线调工具也照样成功。
 hermes_check_core_restart() {
-  local core gw health out before i
+  local core gw health out file before i
   agent_need 核心重启后还能聊 || return 0
   core="wonton-$SMOKE_INSTANCE"
   gw="$(hermes_gateway)" || { extra_item FAIL 核心重启后还能聊 "找不到 gateway 容器"; return 0; }
@@ -139,4 +140,15 @@ hermes_check_core_restart() {
     extra_item FAIL 核心重启后还能聊 "重启核心后收不到加密回复：$(agent_tail "$out")"
   fi
   printf '%s\n' "$out"
+  # 工具这条要模型：同步接上不等于总线也接上了，MCP 那条要单独验（403 会被上游整轮停掉，只有重启网关才好）。
+  agent_need 核心重启后还能调工具 model || return 0
+  file="$(agent_tmp)"
+  if agent_say --reply any --settle 10 --wait "${AGENT_WAIT:-240}" \
+      --text '用 wonton__list_plugins 列出已装的插件，输出每项的 id（形如 xxx.yyy.zzz），一个一行，不要解释。' \
+      >"$file" 2>&1 && grep -q 'ai.usemagpie.magpie' "$file"; then
+    extra_item PASS 核心重启后还能调工具 "重启核心后 Bot 经总线调 wonton__list_plugins 成功，回答里有预装的模型网关"
+  else
+    extra_item FAIL 核心重启后还能调工具 "重启核心后 Bot 调不成 wonton 工具：$(agent_tail "$(cat "$file")")"
+  fi
+  rm -f "$file"
 }
