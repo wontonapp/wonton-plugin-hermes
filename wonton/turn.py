@@ -16,6 +16,11 @@ MCP 的工具线程拷着那份 context 跑，所以拿到的是这一轮自己�
 都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 这张表，不靠“最近一轮”的进程级值。
 查不到就不带身份。
 
+定时任务跑的时候没有人当场说话，会话环境里也只有 Hermes 自己生成的 cron 会话号，``_identity`` 查不到；
+这时按插件上下文的 ``current_cron_execution()`` 认出手上的任务，读它的 origin 当说话人（见 ``_cron_identity``）。
+委派出去的子代理里上游让它返回 None，改读上游自己的执行标记，子代理同样替创建者说话。
+定时任务是上游从 cron 直接进 Agent 的，没有网关消息，所以工具处理器也在 ``pre_llm_call`` 里包。
+
 上游没有插件能挂的“每次工具调用”钩子，只能包它内部的处理器调用；升级 Hermes 时先复查
 ``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` 和 ``mcp.client.session.ClientSession.call_tool``。
 """
@@ -53,6 +58,7 @@ _S = {
     "loop": None,
     "runner": None,
     "session_store": None,
+    "ctx": None,     # 插件上下文：定时任务执行中从它拿这条执行
     "origins": {},   # 会话 id -> {sender, session_key, room, thread, event_id}
     "pending": {},   # 会话键 -> 同上，会话 id 这时还没有
     "active": {},    # 会话 id -> 准了的这一轮的 {sender, session, room, thread}
@@ -65,6 +71,7 @@ _S = {
 
 
 def register(ctx):
+    _S["ctx"] = ctx
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", pre_llm_call)
     ctx.register_hook("on_session_end", on_session_end)
@@ -210,8 +217,56 @@ def _identity(session_id):
     }, "来源记录"
 
 
+def _cron_execution():
+    """手上的定时任务执行，没有时 None。
+
+    先问插件上下文；委派出去的子代理里上游特意让它返回 None（``cron/execution_identity.py``），
+    这时退回读上游自己那份执行标记：子代理跑在委派时拷来的 context 里，标记还在，它替同一件事干活。
+    """
+    ctx = _S["ctx"]
+    execution = ctx.current_cron_execution() if ctx is not None else None
+    if execution is not None:
+        return execution
+    try:
+        from cron.execution_identity import _CURRENT
+
+        return _CURRENT.get()
+    except Exception:
+        return None
+
+
+def _cron_identity():
+    """定时任务（含它委派出去的子代理）调工具时替这条任务的创建者说话。没有定时任务时 None。
+
+    定时任务跑的时候没有人当场说话，`_identity` 查不到；任务的 ``origin`` 记着建任务那一轮的会话环境
+    （上游 ``tools/cronjob_job_args._origin_from_env``），``origin`` 是建任务时从会话环境抄的字符串，
+    A 让 Bot 建的任务就按 A 算，模型在工具子进程里改不了它。
+
+    头是插件自报的，核心只核对“这个 Bot 听不听这个人”（和聊天轮一样）；创建者后来不听这个 Bot 了，
+    核心按认不出算、照旧只读，这里不猜。平台不是正好 ``matrix``、没有创建者、任务没了都不带身份。
+    定时任务没有进行中的轮次，子代理也不是一轮，所以只带代表头，不带 ``wonton-session``。
+    """
+    execution = _cron_execution()
+    if execution is None:
+        return None
+    try:
+        from cron.jobs import get_job
+
+        job = get_job(execution.job_id)
+    except Exception as exc:
+        logger.warning("读定时任务 %s 失败，调用不带身份：%r", execution.job_id, exc)
+        return None
+    origin = (job or {}).get("origin") or {}
+    sender = origin.get("user_id")
+    if not sender or origin.get("platform") != "matrix":
+        return None
+    return {"sender": sender, "room": origin.get("chat_id"), "thread": origin.get("thread_id")}
+
+
 def pre_llm_call(session_id="", sender_id="", **_):
     """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
+    # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
+    _install_headers()
     origin = _origin(session_id) or {}
     sender = sender_id or origin.get("sender")
     if not sender or not origin.get("room") or session_id in _S["reported"]:
@@ -383,9 +438,13 @@ def _install_headers():
     async def call(server, *args, **kwargs):
         env = _session_id()
         turn, source = _identity(env)
-        if source != "轮次":
-            logger.warning("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
         if turn is None:
+            turn = _cron_identity()
+            if turn is not None:
+                logger.debug("MCP 调用来自定时任务：替创建者 %s 说话，不带会话", turn["sender"])
+        if turn is None:
+            if source != "轮次":
+                logger.warning("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
             if env not in _S["unknown"]:
                 _S["unknown"].add(env)
                 logger.warning("这一轮的身份取不到（环境的会话 %r）：调用不带代表头和会话", env)
@@ -412,7 +471,8 @@ def _patch_session(session):
         turn = _CURRENT.get()
         if turn:
             headers[ON_BEHALF_OF] = turn["sender"]
-            headers[SESSION] = turn["session"]
+            if turn.get("session"):
+                headers[SESSION] = turn["session"]
         return headers
 
     session._resolve_param_headers = resolve
