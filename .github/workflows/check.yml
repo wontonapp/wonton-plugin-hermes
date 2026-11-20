@@ -34,10 +34,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 镜像从清单取，不在 workflow 里另写一份：清单升级 Hermes 时形状测试跟着换，否则拿旧镜像比着绿。
       - name: 验证官方 Hermes 中的四语报错和语言隔离
         run: |
+          image="$(python3 - docker-compose.yml <<'PY'
+          import re, sys
+
+          found = re.search(r"nousresearch/hermes-agent:\S+@sha256:[0-9a-f]{64}", open(sys.argv[1], encoding="utf-8").read())
+          sys.exit("清单里没有钉住的 Hermes 镜像") if not found else print(found.group(0))
+          PY
+          )"
           docker run --rm --network none \
             --entrypoint /opt/hermes/.venv/bin/python \
-            -v "$PWD:/plugin:ro" -w /plugin \
-            nousresearch/hermes-agent:v0.22.7@sha256:e6d81ae52ebf6a43efa529701405509f20054ba818f179ddd748bed4f8af584c \
+            -v "$PWD:/plugin:ro" -w /plugin "$image" \
             -m unittest discover -s tests/hermes -v
