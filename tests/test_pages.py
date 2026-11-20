@@ -81,12 +81,17 @@ class WebIdentityCase(unittest.TestCase):
         mom.close()
         self.assertEqual(turn._page_sender(SID), OWNER)
 
-    def test_the_terminal_tab_speaks_last_but_a_page_after_it_wins_again(self):
+    def test_a_terminal_after_the_page_still_reads_the_page(self):
         connect(MOM)
         self.upstream.server._rebind_live_transport(SID, tui_fake.session(SID), tui_fake.Transport("tui"))
-        self.assertIsNone(turn._page_sender(SID))
+        self.assertEqual(turn._page_sender(SID), MOM)
         connect(OWNER)
         self.assertEqual(turn._page_sender(SID), OWNER)
+
+    def test_a_page_without_an_opener_does_not_drop_the_open_one(self):
+        connect(MOM)
+        connect()  # 旧版页面，头还没写进来
+        self.assertEqual(turn._page_sender(SID), MOM)
 
     def test_a_closed_terminal_hands_back_to_a_page_still_open(self):
         terminal = tui_fake.Transport("tui")

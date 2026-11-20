@@ -81,6 +81,10 @@ Telegram 显式使用核心注入的 `WONTON_PROXY_URL`；未配代理时为空�
 认可的是上游内部结构（`WSTransport` 的构造、`server._rebind_live_transport`），`tests/hermes/test_upstream.py` 钉在
 镜像 0.22.7 上：换版本先跑它。
 
+网页后端只在 `plugins.enabled` 里有 `wonton` 时才会被 Hermes 载入：`init_config.py` 每次建容器都补回这一项并从
+`plugins.disabled` 撤掉。控制台的连接是普通的登录连接（`provider: local`，没有 `native_bootstrap`），换代身份时
+`profile_id`/`instance_id` 等字段原样保留，App 的终端页签和桌面控制通道不受影响。
+
 ## 国内 IM 渠道
 
 飞书、钉钉、企业微信（智能机器人）、QQ（官方机器人）、个人微信五个渠道，每个渠道在插件详情页的「设置」里一个开关，
