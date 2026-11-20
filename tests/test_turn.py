@@ -147,11 +147,16 @@ class Session:
         self.calls = []
 
     def _stamp(self, data, opts):
-        if data.get("method") == "tools/call":
-            opts.setdefault("headers", {})["Mcp-Param-Owner"] = "1"
+        # 真的 _preconnect_stamp / _make_modern_stamp 每个请求都盖 Mcp-Param-Owner。
+        opts.setdefault("headers", {})["Mcp-Param-Owner"] = "1"
 
     def adopt(self, result):
         self._stamp = lambda data, opts: Session._stamp(self, data, opts)
+
+    async def list_tools(self, **kwargs):
+        # 包在 ClientSession.list_tools 上，替身转给当前那个（测试每回都重新包）。
+        from mcp.client.session import ClientSession
+        return await ClientSession.list_tools(self, **kwargs)
 
     async def call_tool(self, name, arguments=None, **kwargs):
         self.calls.append((name, arguments, kwargs))
@@ -165,6 +170,46 @@ class Session:
 class Server:
     def __init__(self):
         self.session = Session()
+
+
+async def _list_tools(session, *, params=None):
+    """上游会话的 ``tools/list``：同样要过 ``_stamp``。"""
+    data = {"method": "tools/list", "params": params or {}}
+    opts = {}
+    session._stamp(data, opts)
+    session.headers.append(opts.get("headers", {}))
+    return "listed"
+
+
+mcp_tool = types.ModuleType("tools.mcp_tool")
+mcp_tool._servers = {}
+mcp_tool_loop = types.ModuleType("tools.mcp_tool_loop")
+# 真 _run_on_mcp_loop 把协程扔到 MCP 循环上并同步等；这里直接跑，抛错就等于从调用点抛，结果收着给断言。
+pending_refreshes = []
+
+
+def _run_on_mcp_loop(factory, timeout=None):
+    pending_refreshes.append(None)
+    pending_refreshes[-1] = factory()
+
+
+mcp_tool_loop._run_on_mcp_loop = _run_on_mcp_loop
+mcp_agent = types.ModuleType("tools.mcp_tool_agent")
+refreshed_agents = []
+
+
+def _refresh_agent_mcp_tools(agent, **kwargs):
+    refreshed_agents.append((agent, kwargs))
+    return ["wonton__save_file"]
+
+
+mcp_agent.refresh_agent_mcp_tools = _refresh_agent_mcp_tools
+tools.mcp_tool = mcp_tool
+tools.mcp_tool_loop = mcp_tool_loop
+tools.mcp_tool_agent = mcp_agent
+for _name, _module in (("tools.mcp_tool", mcp_tool), ("tools.mcp_tool_loop", mcp_tool_loop),
+                       ("tools.mcp_tool_agent", mcp_agent)):
+    sys.modules.setdefault(_name, _module)
 
 
 class Response:
@@ -192,8 +237,19 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         turn._S.update({
             "loop": None, "runner": None, "session_store": None, "origins": {}, "pending": {},
             "active": {}, "reported": set(), "ending": set(), "worker": True, "unknown": set(),
-            "warned": False, "ctx": None,
+            "warned": False, "ctx": None, "cron_origins": {}, "cron_warned": {}, "last": None,
+            "listed": None, "warned_list": False, "warned_marker": False,
         })
+        self.server_task = mock.Mock()
+        self.server_task._refresh_tools = mock.Mock(return_value="refreshed")
+        mcp_tool._servers.clear()
+        mcp_tool._servers["wonton"] = self.server_task
+        pending_refreshes.clear()
+        refreshed_agents.clear()
+        # 会话的 list_tools 换成会过 _stamp 的替身，让 _install_headers 包在它外面。
+        from mcp.client.session import ClientSession
+        self.addCleanup(setattr, ClientSession, "list_tools", ClientSession.list_tools)
+        ClientSession.list_tools = _list_tools
         turn._install_headers()
         modules = mock.patch.dict("os.environ", {
             "WONTON_MCP_URL": "http://core:8080/mcp/bus-token",
@@ -277,6 +333,25 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.env["HERMES_SESSION_ID"] = SID
         await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
         self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], OWNER)
+
+    async def test_the_tool_list_carries_the_turn_sender(self):
+        # 清单是按说话人封顶的，连接、重连时取，那时没有进行中的调用；身份得从这一轮来。
+        turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
+        turn.pre_llm_call(session_id=SID, sender_id=OWNER)
+        await self.server.session.list_tools()
+        headers = self.server.session.headers[-1]
+        self.assertEqual(headers["X-Wonton-On-Behalf-Of"], OWNER)
+        self.assertEqual(headers["wonton-session"], SID)
+
+    async def test_a_list_without_any_identity_still_gets_the_owner_param(self):
+        await self.server.session.list_tools()
+        self.assertEqual(self.server.session.headers[-1], {"Mcp-Param-Owner": "1"})
+
+    async def test_a_list_patches_the_session_itself(self):
+        # 连接时的第一份清单比第一次调用先来，会话还没被包过。
+        self.assertFalse(getattr(self.server.session, "_wonton_turn", False))
+        await self.server.session.list_tools()
+        self.assertTrue(getattr(self.server.session, "_wonton_turn", False))
 
     async def test_interleaved_turns_each_carry_their_own_identity(self):
         # 上游把 pre_llm_call 放在别的线程里、用拷贝的 context 跑，工具调用在 Agent 线程自己的 context 里。
@@ -505,6 +580,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
 
 class CronExecution:
     job_id = "job-1"
+    execution_id = "exec-1"
 
 
 class CronCtx:
@@ -538,6 +614,12 @@ class CronCase(TurnCase):
         turn.register(self.ctx)
         return await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
 
+    async def run_cron_turn_start(self):
+        self.ctx.execution = CronExecution()
+        EXECUTION.set(self.ctx.execution)
+        turn.register(self.ctx)
+        turn.pre_llm_call(session_id="cron_job-1_20261120_090000")
+
     async def test_a_cron_tool_call_speaks_for_the_job_creator(self):
         self.assertEqual(await self.cron_call(), "ok")
         headers = self.server.session.headers[-1]
@@ -558,6 +640,90 @@ class CronCase(TurnCase):
         headers = self.server.session.headers[-1]
         self.assertNotIn("X-Wonton-On-Behalf-Of", headers)
         self.assertNotIn("wonton-session", headers)
+
+    async def test_the_tool_list_carries_the_creator(self):
+        # 清单按说话人过滤，连接、重连时取；定时任务下带的是创建者。
+        await self.cron_call()
+        self.server.session.headers.clear()
+        await self.server.session.list_tools()
+        headers = self.server.session.headers[-1]
+        self.assertEqual(headers["X-Wonton-On-Behalf-Of"], MOM)
+        self.assertNotIn("wonton-session", headers)
+
+    async def test_a_list_before_any_call_carries_the_creator(self):
+        # 连接时的清单比第一次调用先来：身份由 pre_llm_call 放下。
+        self.ctx.execution = CronExecution()
+        EXECUTION.set(self.ctx.execution)
+        turn.register(self.ctx)
+        turn.pre_llm_call(session_id="cron_job-1_20261120_090000")
+        await self.server.session.list_tools()
+        self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], MOM)
+
+    async def test_a_new_speaker_relists_and_hands_the_new_tools_to_the_turn(self):
+        # 挂着不动的连接用的是连接那一刻的帽子；换了创建者要在模型调用之前重取，并把新工具交给这一轮。
+        self.ctx.execution = CronExecution()
+        EXECUTION.set(self.ctx.execution)
+        turn.register(self.ctx)
+
+        def turn_start():  # 上游的调用点上有 agent 这个局部变量
+            agent = mock.Mock(session_id="cron_job-1_20261120_090000")
+            turn.pre_llm_call(session_id="cron_job-1_20261120_090000")
+            return agent
+
+        agent = turn_start()
+        self.assertEqual(len(pending_refreshes), 1)
+        self.assertEqual(pending_refreshes, ["refreshed"])
+        self.assertEqual(len(self.server_task._refresh_tools.mock_calls), 1)
+        self.assertEqual(refreshed_agents, [(agent, {"quiet_mode": True, "preserve_prefix": True})])
+
+    async def test_the_same_speaker_does_not_relists(self):
+        await self.run_cron_turn_start()
+        pending_refreshes.clear()
+        refreshed_agents.clear()
+        await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+        await self.run_cron_turn_start()
+        self.assertEqual(pending_refreshes, [])
+        self.assertEqual(refreshed_agents, [])
+
+    async def test_a_failing_relists_keeps_the_old_list_and_warns(self):
+        self.server_task._refresh_tools = mock.Mock(side_effect=RuntimeError("boom"))
+        with mock.patch.object(turn.logger, "warning") as warned:
+            await self.run_cron_turn_start()
+        self.assertIn("按旧清单走", str(warned.call_args))
+        self.assertIsNone(turn._S["listed"])
+
+    async def test_a_cron_job_gone_from_the_store_warns(self):
+        JOBS.clear()
+        with mock.patch.object(turn.logger, "warning") as warned:
+            await self.cron_call()
+        self.assertIn("任务没了", str(warned.call_args))
+
+    async def test_a_cron_job_from_another_platform_warns_once(self):
+        JOBS["job-1"] = {"origin": {"platform": "telegram", "chat_id": "42", "user_id": MOM}}
+        with mock.patch.object(turn.logger, "warning") as warned:
+            await self.cron_call()
+            await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+        texts = [str(call) for call in warned.call_args_list]
+        self.assertEqual(sum("origin 用不上" in text for text in texts), 1)
+
+    async def test_a_changed_origin_warns_again(self):
+        JOBS["job-1"] = {"origin": {"platform": "telegram", "chat_id": "42", "user_id": MOM}}
+        await self.cron_call()
+        JOBS["job-1"] = {"origin": {"platform": "slack", "chat_id": "43", "user_id": MOM}}
+        self.ctx.execution = CronExecution()
+        self.ctx.execution.execution_id = "exec-2"
+        EXECUTION.set(self.ctx.execution)
+        with mock.patch.object(turn.logger, "warning") as warned:
+            await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+        self.assertIn("slack", str(warned.call_args))
+
+    async def test_a_missing_execution_marker_warns_once(self):
+        with mock.patch.dict(sys.modules, {"cron.execution_identity": None}):
+            with mock.patch.object(turn.logger, "warning") as warned:
+                self.assertIsNone(turn._cron_execution())
+                self.assertIsNone(turn._cron_execution())
+        self.assertIn("执行标记", str(warned.call_args))
+        self.assertEqual(warned.call_count, 1)
 
     async def test_a_cron_job_with_an_odd_platform_value_carries_no_identity(self):
         JOBS["job-1"] = {"origin": {"platform": "Matrix", "chat_id": MOM_ROOM, "user_id": MOM}}
@@ -594,10 +760,40 @@ class CronCase(TurnCase):
 
     async def test_a_cron_run_installs_the_headers_without_a_gateway_message(self):
         # 进程中只跑定时任务、没收到过网关消息时，pre_gateway_dispatch 不会来，工具调用靠 pre_llm_call 包。
+        self.addCleanup(setattr, handlers, "_call_tool_racing_stdio_death",
+                        handlers._call_tool_racing_stdio_death)
         handlers._call_tool_racing_stdio_death = _upstream
         self.assertFalse(getattr(handlers._call_tool_racing_stdio_death, "_wonton_turn", False))
         turn.pre_llm_call(session_id="cron_job-1_20261120_090000")
         self.assertTrue(getattr(handlers._call_tool_racing_stdio_death, "_wonton_turn", False))
+
+
+class RefreshCase(unittest.TestCase):
+    def setUp(self):
+        self.one = mock.Mock(_refresh_tools=mock.Mock(return_value="one"))
+        self.two = mock.Mock(_refresh_tools=mock.Mock(return_value="two"))
+        mcp_tool._servers.clear()
+        mcp_tool._servers.update({"one": self.one, "two": self.two})
+        pending_refreshes.clear()
+
+    def test_a_failing_relists_does_not_stop_the_others(self):
+        self.one._refresh_tools.side_effect = RuntimeError("boom")
+        with mock.patch.object(turn.logger, "warning") as warned:
+            turn._refresh_tools()
+        self.assertEqual(len(pending_refreshes), 2)
+        self.assertIn("没重取上", str(warned.call_args))
+
+    def test_every_relists_failing_raises_the_first(self):
+        self.one._refresh_tools.side_effect = RuntimeError("first")
+        self.two._refresh_tools.side_effect = RuntimeError("second")
+        with self.assertRaisesRegex(RuntimeError, "first"):
+            turn._refresh_tools()
+
+    def test_no_connected_server_reports_false(self):
+        for task in (self.one, self.two):
+            task.session = None
+        self.assertFalse(turn._refresh_tools())
+        self.assertEqual(pending_refreshes, [])
 
 
 class OutboxCase(unittest.IsolatedAsyncioTestCase):
