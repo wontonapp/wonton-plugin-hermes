@@ -311,6 +311,9 @@ def _page_sender(session_id):
         except AttributeError as exc:
             _warn_pages(session_id, f"上游的会话表换了形状：{exc!r}")
     remembered = _S["webs"].get(session_id)
+    # 记下的连接已经不在会话里了（上游拆 Fanout 时子连接的 ``_closed`` 不置位，光看标记发现不了）：记录
+    # 就是它的话已经过时，改由还剩的活连接里最后提交的那条说。别的控制台进程里刚打完字的记录本进程
+    # 不认识它的连接，照旧信记录。
     stale = (remembered is not None and live is not None
              and not any(peer is remembered for peer in live)
              and (recorded is None or _page_user(remembered) == recorded.strip()))
@@ -634,6 +637,7 @@ def on_session_end(session_id="", **_):
         logger.warning("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
     _S["active"].pop(session_id, None)
     _S["webs"].pop(session_id, None)
+    _S["page_warned"].discard(session_id)
     _pages().forget(session_id)
     _S["page_warned"].discard(session_id)
     _S["unknown"].discard(session_id)

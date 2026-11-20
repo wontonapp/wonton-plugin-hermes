@@ -102,6 +102,50 @@ class WebIdentityCase(unittest.TestCase):
         connect(OWNER)
         self.assertEqual(turn._page_sender(SID), OWNER)
 
+    def test_the_record_that_is_no_longer_attached_does_not_speak(self):
+        mom = connect(MOM)
+        connect(OWNER)
+        # A 最后提交过（盘上和进程里都记着它），随后 A 的页签关了；上游 Fanout.close() 只把子连接摘掉，
+        # 不置子连接的 _closed，记着的那对象仍看着“活着”。B 还开着，这一轮该 B 说。
+        pages.remember_user(SID, MOM)
+        turn._S["webs"][SID] = mom
+        tui_fake.session(SID)["transport"].detach(mom)
+        self.assertEqual(turn._page_sender(SID), OWNER)
+
+    def test_one_session_ending_does_not_warn_for_another(self):
+        turn._S["gateway"] = object()  # 没有 _sessions
+        turn._page_sender(SID)
+        with self.assertLogs("wonton.turn", "WARNING"):
+            turn._page_sender("other")
+
+    def test_no_upstream_session_table_is_a_debug_round_not_the_one_shot(self):
+        turn._S["gateway"] = None
+        with self.assertLogs("wonton.turn", "DEBUG") as logs:
+            self.assertIsNone(turn._page_sender(SID))
+            self.assertIsNone(turn._page_sender(SID))
+        self.assertEqual(len(logs.records), 2)
+        self.assertEqual(turn._S["page_warned"], set())
+
+    def test_a_changed_upstream_shape_warns_once_per_session(self):
+        turn._S["gateway"] = object()  # 没有 _sessions
+        with self.assertLogs("wonton.turn", "WARNING") as logs:
+            self.assertIsNone(turn._page_sender(SID))
+            self.assertIsNone(turn._page_sender(SID))
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(turn._S["page_warned"], {SID})
+        turn.on_session_end(session_id=SID)
+        with self.assertLogs("wonton.turn", "WARNING"):
+            turn._page_sender(SID)
+
+    def test_a_server_internal_connection_is_not_a_person(self):
+        upstream = tui_fake.modules()
+        transport = upstream.ws.WSTransport(
+            tui_fake.WS(), None,
+            auth_identity={"user_id": "server-internal", "provider": "server-internal"})
+        upstream.server._rebind_live_transport(SID, tui_fake.session(SID), transport)
+        self.assertEqual(transport.auth_identity["provider"], "server-internal")
+        self.assertIsNone(turn._page_sender(SID))
+
     def test_a_page_without_an_opener_does_not_drop_the_open_one(self):
         connect(MOM)
         connect()  # 旧版页面，头还没写进来
@@ -221,3 +265,7 @@ class PageFilesCase(unittest.TestCase):
         page = self.note(MOM)
         page.write({"params": {"type": "message.start", "session_id": SID}})
         self.assertEqual(pages.recorded(SID), MOM)
+
+
+if __name__ == "__main__":
+    unittest.main()

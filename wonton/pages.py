@@ -1,7 +1,8 @@
 """网页控制台里的对话替打开者说话：让网页连接带上核心盖的打开者。
 
 云吞核心把插件网页转给 Hermes 之前，在升级请求上写一条 ``X-Wonton-Web-User``（值是打开者的 Matrix
-用户 ID），转发前先剥掉客户端自己带的同名头。开在云吞 App 里的终端页签走内部凭据，没有这条头。
+用户 ID），转发前先剥掉客户端自己带的同名头。开在云吞 App 里的终端页签也是经核心转发、由设备认出人的，
+同样带头；只有真走 ``x-hermes-auth`` 内部凭据、不经核心的连接（``provider`` 为 ``server-internal``）没有。
 
 上游 ``gateway_ws`` 鉴权后盖一份主机主人的身份，连同连接一起交给 ``WSTransport``。补丁打在这里、存下
 身份之后换掉 ``user_id``：会话归属照旧（上游对有已认证身份的一律算主机主人），认人只落在这条连接上，
@@ -38,7 +39,10 @@ _MARK = "_wonton_pages"
 
 
 def install(turn_of):
-    """给上游连接类装上打开者。``turn_of`` 拿插件里管网页身份的那份代码。装上了返回 True。"""
+    """给上游连接类装上打开者。``turn_of`` 拿插件里管网页身份的那份代码（模块或返回它的函数）。装上了返回 True。"""
+    if not callable(turn_of):
+        target = turn_of
+        turn_of = lambda: target  # noqa: E731
     try:
         ws = importlib.import_module("tui_gateway.ws")
         server = importlib.import_module("tui_gateway.server")
@@ -46,9 +50,12 @@ def install(turn_of):
         logger.error("上游没有控制台入口，网页对话会按只读：%r", exc)
         return False
     original = ws.WSTransport.__init__
-    if getattr(original, _MARK, False):
-        return True
     try:
+        if getattr(original, _MARK, False):
+            # 热重载过：钩子跑在新模块里，补丁还指着旧模块，得重新绑；连接类的 __init__ 不必再包一层。
+            turn_of().attach_gateway(server)
+            _patch_rebind(server, turn_of)
+            return True
         ws.WSTransport.__init__ = _init(original, turn_of)
         _patch_writes(ws.WSTransport)
         _patch_pty()
