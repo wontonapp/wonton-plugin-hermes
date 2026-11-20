@@ -37,6 +37,9 @@ from wonton import turn  # noqa: E402
 OWNER = "@owner:example.org"
 ROOM = "!dm1:example.org"
 SID = "session-1"
+MOM = "@mom:example.org"
+MOM_ROOM = "!dm2:example.org"
+MOM_SID = "session-2"
 
 
 class Origin:
@@ -51,10 +54,18 @@ class Entry:
         self.origin = Origin()
 
 
+class MomOrigin:
+    chat_id, thread_id, platform, user_id = MOM_ROOM, None, "matrix", MOM
+
+
+class MomEntry:
+    origin = MomOrigin()
+
+
 class Store:
     def __init__(self):
         self.keys = {}
-        self.entries = {SID: Entry()}
+        self.entries = {SID: Entry(), MOM_SID: MomEntry()}
 
     def _generate_session_key(self, source):
         return f"key:{source.chat_id}"
@@ -180,6 +191,22 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.env["HERMES_SESSION_ID"] = SID
         await handlers._call_tool_racing_stdio_death(self.server, "x", {})
         self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], OWNER)
+
+    async def test_a_second_session_does_not_take_over_the_firsts_identity(self):
+        # 主人那一轮还开着，会话环境里的会话号也还指着它；妈妈那一轮这时开始，
+        # 它的工具调用带的得是它自己。串号时卡片会挂到主人那条链上，停链撤不回。
+        await self.turn()
+        self.server.session.calls.clear()
+        self.server.session.headers.clear()
+
+        async def mom_turn():
+            turn.pre_llm_call(session_id=MOM_SID, sender_id=MOM)
+            return await handlers._call_tool_racing_stdio_death(self.server, "x", {})
+
+        self.assertEqual(await asyncio.create_task(mom_turn()), "ok")
+        headers = self.server.session.headers[0]
+        self.assertEqual(headers["X-Wonton-On-Behalf-Of"], MOM)
+        self.assertEqual(headers["wonton-session"], MOM_SID)
 
     async def test_end_clears_the_turn(self):
         await self.turn()

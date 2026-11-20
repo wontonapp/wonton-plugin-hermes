@@ -43,6 +43,9 @@ ORIGIN = "app.wonton/origin"
 START_TIMEOUT = 5.0
 # 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用。
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
+# 这一轮替谁说话：`pre_llm_call` 拿到准的会话号时在轮次的任务里设，工具调用和它同一条任务。
+# 会话环境里的会话号是 Agent 构造时写的，换一轮可能还没刷新，两条会话交错时会串号。
+_TURN = contextvars.ContextVar("wonton_own_turn", default=None)
 # 报链结束走后台单线程：钩子在网关事件循环里，同步请求会把所有会话卡住。
 _CHAIN_POSTS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="wonton-chain")
 
@@ -187,19 +190,28 @@ def _origin(session_id):
 
 
 def _identity(session_id):
-    """这一轮替谁说话：报链准了用准了的那份，没报上时退回记下的来源。"""
+    """这一轮替谁说话，连同这份身份是哪来的。
+
+    先看这一轮自己设的（轮次的任务里，准）；再按会话环境里的会话号查；两个都没有时，
+    只有一条会话在跑就认它；最后退回会话号记下的来源。
+    """
+    turn = _TURN.get()
+    if turn is not None:
+        return turn, "轮次"
     active = _S["active"].get(session_id)
     if active is not None:
-        return active
+        return active, "会话环境"
+    if len(_S["active"]) == 1:
+        return next(iter(_S["active"].values())), "唯一在跑的会话"
     origin = _S["origins"].get(session_id)
     if origin is None or not origin.get("sender"):
-        return None
+        return None, "无"
     return {
         "sender": origin["sender"],
         "session": session_id,
         "room": origin.get("room"),
         "thread": origin.get("thread"),
-    }
+    }, "来源记录"
 
 
 def pre_llm_call(session_id="", sender_id="", **_):
@@ -208,6 +220,12 @@ def pre_llm_call(session_id="", sender_id="", **_):
     sender = sender_id or origin.get("sender")
     if not sender or not origin.get("room") or session_id in _S["reported"]:
         return None
+    _TURN.set({
+        "sender": sender,
+        "session": session_id,
+        "room": origin.get("room"),
+        "thread": origin.get("thread"),
+    })
     body = {
         "phase": "start",
         "session": session_id,
@@ -295,6 +313,7 @@ def _refusal_text(refusal, sender, detail=""):
 
 def on_session_end(session_id="", **_):
     """这一轮结束：清身份，报过的链报结束。"""
+    _TURN.set(None)
     if _S["ending"] and session_id not in _S["ending"]:
         logger.info("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
     _S["active"].pop(session_id, None)
@@ -372,7 +391,9 @@ def _install_headers():
         return
 
     async def call(server, *args, **kwargs):
-        turn = _identity(_session_id())
+        env = _session_id()
+        turn, source = _identity(env)
+        logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
         if turn is None:
             return await original(server, *args, **kwargs)
         _patch_session(server.session)
