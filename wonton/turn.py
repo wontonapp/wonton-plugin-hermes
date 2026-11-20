@@ -43,7 +43,8 @@ ORIGIN = "app.wonton/origin"
 
 # 报链开始的超时：pre_llm_call 钩子要在这里面拿到准信，才决定这一轮做不做。
 START_TIMEOUT = 5.0
-# 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用。
+# 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用：仍然是个 contextvar，但在
+# 每次调用自己的任务里 set，值跟着任务走，不看进程里最近是哪一轮。
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
 # 报链结束走后台单线程：钩子在网关事件循环里，同步请求会把所有会话卡住。
 _CHAIN_POSTS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="wonton-chain")
