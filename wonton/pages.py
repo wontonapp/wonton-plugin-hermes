@@ -17,9 +17,12 @@
 ``$HERMES_HOME/wonton-web-users/<会话号>`` 写着谁，网关那边的 ``turn._page_sender`` 就读谁。两边共用
 ``HERMES_HOME``。写的人有两个：``/chat`` 的终端连接每收一次键，就按上游子的活动会话文件把这一页记到
 那会话上；``note_peer`` 带着提交的连接再记一次（网页控制台里的对话从网关进来时它在那一侧被调到）。同一会话
-开着两页时后写的算数。会话结束时删掉。
+开着两页时后写的算数。
 
-两处都是上游内部结构（0.22.7），``tests/hermes/test_upstream.py`` 钉着；取不到时网页回到只读，不认错人。
+两处都是上游内部结构；取不到时网页回到只读，不认错人。
+
+记录按会话号存在 ``$HERMES_HOME/wonton-web-users/`` 下，会话结束和重置时删掉，隔周没动过的也一并扫掉。
+没有 ``HERMES_HOME`` 时全部落在这份记录上的活儿都是空操作。
 """
 
 import functools
@@ -29,13 +32,19 @@ import logging
 import os
 import pathlib
 import tempfile
+import time
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
 HEADER = "x-wonton-web-user"
-# 身份上的来源标记：只认带它的连接，别的（TUI、终端、内部凭据）不掺和。
+# 连接身份的来源标记：只有带它的连接才取出打开者（``opener_of``）；``remember_user`` 收谁就是谁。
 PROVIDER = "wonton"
 _MARK = "_wonton_pages"
+_NOTE = "_wonton_note"
+_TMP_PREFIX = ".wonton-web-user-"
+_KEEP_SECONDS = 7 * 24 * 60 * 60
+_WRITTEN = 0  # 记录改过几回；连接自己的缓存按它判断还灵不灵
 
 
 def install(turn_of):
@@ -52,19 +61,35 @@ def install(turn_of):
     original = ws.WSTransport.__init__
     try:
         if getattr(original, _MARK, False):
-            # 热重载过：钩子跑在新模块里，补丁还指着旧模块，得重新绑；连接类的 __init__ 不必再包一层。
+            # 热重载过：钩子跑在新模块里，要改叫新模块，``_S`` 才落在新模块里；连接类不必再包一层。
+            _point_at(original, turn_of)
             turn_of().attach_gateway(server)
+            rebind = getattr(server, "_rebind_live_transport", None)
+            if getattr(rebind, "_wonton_rebind", False):
+                _point_at(rebind, turn_of)
             _patch_rebind(server, turn_of)
             return True
         ws.WSTransport.__init__ = _init(original, turn_of)
-        _patch_writes(ws.WSTransport)
-        _patch_pty()
         turn_of().attach_gateway(server)
         _patch_rebind(server, turn_of)
     except Exception as exc:
+        # 身份和会话表是认人的根：这一步过不去就不留下换了一半的连接类。
+        if ws.WSTransport.__init__ is not original:
+            ws.WSTransport.__init__ = original
         logger.error("上游的连接或会话表换了形状，网页对话会按只读：%r", exc)
         return False
+    # 这两处只影响「哪一页开着哪个会话」，装不上照样按连接上的人认。
+    for patch in (lambda: _patch_writes(ws.WSTransport), _patch_pty):
+        try:
+            patch()
+        except Exception as exc:
+            logger.error("网页连接的补丁只装上一部分，会话可能对不上这一页：%r", exc)
     return True
+
+
+def _point_at(patch, turn_of):
+    """让补丁改叫新模块的函数：热重载后旧闭包里的那份 ``turn`` 已经没人更新。"""
+    patch._turn = turn_of
 
 
 def _patch_writes(transport_class):
@@ -92,7 +117,8 @@ def _patch_pty():
     """``/chat`` 的终端连接在 dashboard 里：它替哪个会话收键，就把这一页记到那个会话名下。
 
     这一页的会话号是子进程写进 ``session.active_session_file`` 的，随键到达现读，不缓存、不轮询。
-    终端的连接本身没有打开者，也不是发出对话的那条连接，只用来给「这一页现在开着哪条会话」对上号。
+    终端的连接没有 ``auth_identity``，也不是发出对话的那条连接，打开者靠页面带进来的头，
+    只用来给「这一页现在开着哪条会话」对上号。
     """
     try:
         chat_ws = importlib.import_module("hermes_cli.web_routers.chat_ws")
@@ -108,15 +134,21 @@ def _patch_pty():
         opener = _opener(ws)
         path = getattr(session, "active_session_file", None)
         if opener and path is not None:
-            noted_id = {}
-            _note_marker(path, opener, noted_id)
-            write = session.write
+            # 重挂会再给 ``session.write`` 包一层；层里的打开者改叫这一页的，层数不涨。
+            slot = getattr(session.write, _NOTE, None)
+            if slot is None:
+                write = session.write
+                slot = {"opener": opener, "noted": {}, "path": path}
 
-            async def noted(ws_, raw, __write=write):
-                _note_marker(path, opener, noted_id)
-                return await __write(ws_, raw)
+                async def noted(ws_, raw, __write=write, __slot=slot):
+                    _note_marker(__slot["path"], __slot["opener"], __slot["noted"])
+                    return await __write(ws_, raw)
 
-            session.write = noted
+                setattr(noted, _NOTE, slot)
+                session.write = noted
+            else:
+                slot.update(opener=opener, path=path)
+            _note_marker(slot["path"], slot["opener"], slot["noted"])
         return await original(ws, session, *args, **kwargs)
 
     setattr(pump, _MARK, True)
@@ -144,13 +176,17 @@ def _sniff(transport, frame):
     session_id = params.get("session_id") if isinstance(params, dict) else None
     if not isinstance(session_id, str) or not session_id:
         return
-    if getattr(transport, "_wonton_served", None) == session_id and recorded(session_id) is not None:
+    # 一条在播的会话帧很多，盘上的记录只在改过（写过、删过）以后才值得再看一眼。
+    if (getattr(transport, "_wonton_served", None) == session_id
+            and getattr(transport, "_wonton_written", None) == _WRITTEN):
         return
     try:
         remember(session_id, transport)
     except Exception as exc:
-        logger.error("记不下这一页开着哪条会话：%r", exc)
-    transport._wonton_served = session_id
+        logger.error("记不下这一页开着哪条会话，下一帧再试：%r", exc)
+    else:
+        transport._wonton_served = session_id
+        transport._wonton_written = _WRITTEN
 
 
 def _init(original, turn_of):
@@ -163,10 +199,11 @@ def _init(original, turn_of):
             identity.update(user_id=opener, provider=PROVIDER)
             self.auth_identity = identity
         try:
-            turn_of().note_page()
+            getattr(init, "_turn", turn_of)().note_page()
         except Exception as exc:
             logger.error("网页连接交给 turn 失败，出箱轮询和 MCP 头会缺：%r", exc)
     setattr(init, _MARK, True)
+    _point_at(init, turn_of)
     return init
 
 
@@ -183,12 +220,13 @@ def _patch_rebind(server, turn_of):
     def rebind(sid, session, transport, *args, **kwargs):
         result = original(sid, session, transport, *args, **kwargs)
         try:
-            turn_of().note_peer(sid, transport)
+            getattr(rebind, "_turn", turn_of)().note_peer(sid, transport)
         except Exception as exc:
             logger.error("记不下这一轮是哪个网页连接提交的：%r", exc)
         return result
 
     rebind._wonton_rebind = True
+    _point_at(rebind, turn_of)
     server._rebind_live_transport = rebind
 
 
@@ -216,10 +254,13 @@ def remember_user(session_id, opener):
         return
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=directory)
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=_TMP_PREFIX)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(opener or "")
         os.replace(tmp, directory / _file_name(session_id))
+        global _WRITTEN
+        _WRITTEN += 1
+        _prune(directory)
     except OSError as exc:
         logger.error("记不下这一轮是哪个网页连接提交的，会按只读：%r", exc)
 
@@ -239,13 +280,19 @@ def recorded(session_id):
 
 
 def forget(session_id):
+    """删掉``会话号``的记录：会话结束、重置都调它，没记过是空操作。"""
     directory = _directory()
+    if directory is None or not session_id:
+        return
     try:
         (directory / _file_name(session_id)).unlink()
-    except (AttributeError, FileNotFoundError):
-        pass
-    except OSError as exc:
+    except FileNotFoundError:
+        return
+    except (OSError, TypeError) as exc:
         logger.warning("没扫掉 %s 的提交者记录：%r", session_id, exc)
+        return
+    global _WRITTEN
+    _WRITTEN += 1
 
 
 def opener_of(transport):
@@ -262,4 +309,20 @@ def _directory():
 
 
 def _file_name(session_id):
-    return session_id.replace("/", "_").replace(os.sep, "_")
+    # ``a/b`` 与 ``a_b`` 直接替换分隔符会撞名，编一下；会话号里只有安全字符时还与原来一样。
+    return urllib.parse.quote(session_id, safe="")
+
+
+def _prune(directory):
+    """扫掉一个星期没动过的记录：页面关了而会话没结束的那份没人再删。"""
+    stale = time.time() - _KEEP_SECONDS
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if not entry.name.startswith(_TMP_PREFIX) and entry.stat().st_mtime < stale:
+                os.unlink(entry.path)
+        except OSError:
+            pass

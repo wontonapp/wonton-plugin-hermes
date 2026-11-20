@@ -94,6 +94,7 @@ _S = {
 
 
 def register(ctx):
+    _S["ctx"] = ctx
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", pre_llm_call)
     ctx.register_hook("on_session_end", on_session_end)
@@ -639,7 +640,6 @@ def on_session_end(session_id="", **_):
     _S["webs"].pop(session_id, None)
     _S["page_warned"].discard(session_id)
     _pages().forget(session_id)
-    _S["page_warned"].discard(session_id)
     _S["unknown"].discard(session_id)
     _S["unknown"].discard("")
     _S["reported"].discard(session_id)

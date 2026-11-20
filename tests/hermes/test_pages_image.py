@@ -74,6 +74,10 @@ class RouteCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(seen, "上游没走到 handle_ws")
         return transports[0]
 
+    def test_the_warning_set_takes_a_session(self):
+        turn._warn_pages("s1", "boom")
+        self.assertIn("s1", turn._S["page_warned"])
+
     async def test_the_opener_from_the_gateway_wins(self):
         # 核心在转发前剥掉了客户端自己带的同名头、写下打开者；插件照单全收，不碰登录身份的其他字段
         identity = (await self.call(MOM)).auth_identity

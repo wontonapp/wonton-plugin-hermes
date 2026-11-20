@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -17,6 +18,8 @@ if str(ROOT) not in sys.path:
 
 import tui_fake  # noqa: E402
 from wonton import pages, turn  # noqa: E402
+
+ORIGINAL_INIT = tui_fake.WSTransport.__init__
 
 SID = "web-session"
 MOM = "@mom:example.org"
@@ -113,13 +116,13 @@ class WebIdentityCase(unittest.TestCase):
         self.assertEqual(turn._page_sender(SID), OWNER)
 
     def test_one_session_ending_does_not_warn_for_another(self):
-        turn._S["gateway"] = object()  # 没有 _sessions
+        turn._S["server"] = object()  # 没有 _sessions
         turn._page_sender(SID)
         with self.assertLogs("wonton.turn", "WARNING"):
             turn._page_sender("other")
 
     def test_no_upstream_session_table_is_a_debug_round_not_the_one_shot(self):
-        turn._S["gateway"] = None
+        turn._S["server"] = None
         with self.assertLogs("wonton.turn", "DEBUG") as logs:
             self.assertIsNone(turn._page_sender(SID))
             self.assertIsNone(turn._page_sender(SID))
@@ -127,7 +130,7 @@ class WebIdentityCase(unittest.TestCase):
         self.assertEqual(turn._S["page_warned"], set())
 
     def test_a_changed_upstream_shape_warns_once_per_session(self):
-        turn._S["gateway"] = object()  # 没有 _sessions
+        turn._S["server"] = object()  # 没有 _sessions
         with self.assertLogs("wonton.turn", "WARNING") as logs:
             self.assertIsNone(turn._page_sender(SID))
             self.assertIsNone(turn._page_sender(SID))
@@ -232,6 +235,16 @@ class PageFilesCase(unittest.TestCase):
         self.assertEqual(session.written, [b"x"])
         self.assertEqual(pages.recorded(SID), MOM)
 
+    def test_a_reconnected_terminal_keeps_one_layer(self):
+        path = self.home / "active.json"
+        session = tui_fake.PTY(SID, path)
+        session.input.append(b"a")
+        asyncio.run(tui_fake.chat()._pump_keepalive_input(tui_fake.WS(MOM), session))
+        session.input.append(b"b")
+        with mock.patch.object(pages, "_note_marker", wraps=pages._note_marker) as note:
+            asyncio.run(tui_fake.chat()._pump_keepalive_input(tui_fake.WS(MOM), session))
+        self.assertEqual(note.call_count, 2)  # 连上时一次、这一键一次；再包一层会是 3
+
     def test_one_record_per_connection_and_session(self):
         path = self.home / "active.json"
         session = tui_fake.PTY(SID, path)
@@ -265,6 +278,85 @@ class PageFilesCase(unittest.TestCase):
         page = self.note(MOM)
         page.write({"params": {"type": "message.start", "session_id": SID}})
         self.assertEqual(pages.recorded(SID), MOM)
+
+    def test_a_reset_forgets_the_old_session(self):
+        pages.remember_user(SID, MOM)
+        turn.on_session_reset(session_id="new", old_session_id=SID)
+        self.assertIsNone(pages.recorded(SID))
+
+    def test_two_session_ids_differing_only_in_the_separator_keep_their_own_page(self):
+        pages.remember_user("a/b", MOM)
+        pages.remember_user("a_b", OWNER)
+        self.assertEqual(pages.recorded("a/b"), MOM)
+        self.assertEqual(pages.recorded("a_b"), OWNER)
+
+    def test_a_record_is_not_looked_up_again_on_every_frame(self):
+        page = self.note(MOM)
+        frames = ({"params": {"type": "message.start", "session_id": SID}},)
+        page.write(frames[0])
+        with mock.patch.object(pages, "recorded", wraps=pages.recorded) as looked:
+            page.write(frames[0])
+            page.write(frames[0])
+        self.assertEqual(looked.call_count, 0)
+        # 记录被删掉（会话结束）以后还要能写回来。
+        pages.forget(SID)
+        page.write(frames[0])
+        self.assertEqual(pages.recorded(SID), MOM)
+
+    def test_a_broken_optional_patch_keeps_the_identity_and_says_so(self):
+        self.upstream = tui_fake.wire()
+        tui_fake.WSTransport.__init__ = ORIGINAL_INIT
+        with mock.patch.object(pages, "_patch_pty", side_effect=RuntimeError("boom")):
+            with self.assertLogs("wonton.pages", "ERROR"):
+                self.assertTrue(pages.install(turn))
+        self.assertIs(turn._S["server"], self.upstream.server)
+        connect(MOM)
+        self.assertEqual(turn._page_sender(SID), MOM)
+
+    def test_a_failed_install_puts_the_connection_class_back(self):
+        self.upstream = tui_fake.wire()
+        tui_fake.WSTransport.__init__ = ORIGINAL_INIT
+        before = self.upstream.ws.WSTransport.__init__
+        with mock.patch.object(turn, "attach_gateway", side_effect=RuntimeError("boom")):
+            with self.assertLogs("wonton.pages", "ERROR"):
+                self.assertFalse(pages.install(turn))
+        self.assertIs(self.upstream.ws.WSTransport.__init__, before)
+
+
+    def test_a_reload_points_the_hook_at_the_new_module(self):
+        calls = []
+        stub = types.ModuleType("turn_stub")
+        stub.attach_gateway = lambda server: calls.append("attach")
+        stub.note_page = lambda: calls.append("note_page")
+        stub.note_peer = lambda sid, transport: calls.append("note_peer")
+        pages.install(lambda: stub)
+        connect(MOM)
+        self.assertEqual(calls, ["attach", "note_page", "note_peer"])
+
+
+class NoHomeCase(unittest.TestCase):
+    """没有 ``HERMES_HOME`` 时（``tests/test_turn.py`` 就不设）不该炸，网页只是认不出人。"""
+
+    def setUp(self):
+        self.upstream = reset()
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("HERMES_HOME", None)
+
+    def test_forget_without_a_home_is_a_no_op(self):
+        pages.forget(SID)
+
+    def test_the_end_clears_the_rest_even_without_a_home(self):
+        turn._S["active"][SID] = {"sender": MOM}
+        turn._S["origins"][SID] = {"session_key": "k"}
+        turn._S["unknown"].update({SID, ""})
+        turn._S["reported"].add(SID)
+        turn.on_session_end(session_id=SID)
+        self.assertEqual(turn._S["active"], {})
+        self.assertEqual(turn._S["origins"], {})
+        self.assertEqual(turn._S["unknown"], set())
+        self.assertEqual(turn._S["reported"], set())
 
 
 if __name__ == "__main__":
