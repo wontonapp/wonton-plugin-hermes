@@ -2,7 +2,8 @@
 
 云吞核心靠请求头知道 MCP 工具调用替谁说话、属于哪一轮：``X-Wonton-On-Behalf-Of`` 是说话人，
 ``wonton-session`` 是这一轮的会话，``app.wonton/origin`` 的 ``_meta`` 给房间和话题。Hermes 的 MCP
-客户端每轮不带这些，所以在工具处理器的调用上加；值来自会话环境（见下）。
+客户端每轮不带这些，所以在工具处理器的调用上加；值来自工具调用自己 context 的
+``HERMES_SESSION_ID``（见下）。
 
 开轮时向核心报链（``POST <核心>/agent/chains/<令牌>``，带 Bot 的 Matrix 令牌），核心按说话人验证，
 被拒时这一轮就以那条原因结束、不再推理；结束报 ``End``。核心停链时往出箱
@@ -10,10 +11,11 @@
 批准过的私聊消息（``Message``）由这里用 Bot 的 Matrix 客户端发出，出箱项 ID 当 Matrix 事务 ID，
 核心重发同一条不会发两遍。
 
-身份从 ``gateway.session_context`` 的会话环境取（``HERMES_SESSION_ID`` 等），不靠钩子里的
-contextvar：``pre_llm_call`` 在单独的线程里跑，它 set 的 contextvar 回到 Agent 线程就没了。工具处理器
-在 Agent 线程上跑，那里的会话环境是对的，``_run_on_mcp_loop`` 提交时上游用
-``asyncio.run_coroutine_threadsafe`` 复制调用方的 contextvars，所以处理器里 set 的值在 MCP 循环上也看得到。
+身份靠工具调用自己 context 里的 ``HERMES_SESSION_ID``：上游在 Agent 线程的 context 里按这一轮绑好它，
+MCP 的工具线程拷着那份 context 跑，所以拿到的是这一轮自己的会话号，同时几轮也不会串。
+``pre_llm_call`` 在别的线程、拷的上下文里跑，它设的 contextvar 回不到工具线程（0.22.7 实测 3/3 次工具调用
+都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 和 ``_S["origins"]`` 两张表，不靠“最近一轮”的进程级值。
+只有会话号时带 ``wonton-session``、不带代表头，让核心按会话去认；连会话号也取不到才不带身份。
 
 上游没有插件能挂的“每次工具调用”钩子，只能包它内部的处理器调用；升级 Hermes 时先复查
 ``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` 和 ``mcp.client.session.ClientSession.call_tool``。
@@ -30,7 +32,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .locale import language
-from .texts import CHAIN_BUSY, CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_SELF, CHAIN_STOPPED
+from .texts import CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_OTHER, CHAIN_SELF, CHAIN_STOPPED
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,8 @@ ORIGIN = "app.wonton/origin"
 
 # 报链开始的超时：pre_llm_call 钩子要在这里面拿到准信，才决定这一轮做不做。
 START_TIMEOUT = 5.0
-# 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用。
+# 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用：仍然是个 contextvar，但在
+# 每次调用自己的任务里 set，值跟着任务走，不看进程里最近是哪一轮。
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
 # 报链结束走后台单线程：钩子在网关事件循环里，同步请求会把所有会话卡住。
 _CHAIN_POSTS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="wonton-chain")
@@ -55,6 +58,7 @@ _S = {
     "active": {},    # 会话 id -> 准了的这一轮的 {sender, session, room, thread}
     "reported": set(),  # 这一轮已经报过链开始的会话 id
     "ending": set(),    # 结束时要报 End 的会话 id（准了和被拒的都要报）
+    "unknown": set(),   # 已经提醒过“身份取不到”的会话环境值；空串在每轮结束时重新提醒
     "worker": None,
     "warned": False,
 }
@@ -84,7 +88,12 @@ def _is_matrix(platform):
 
 
 def _session_var(name):
-    """会话环境里的一项：网关按这一轮绑定，工具处理器所在的 Agent 线程看得到。"""
+    """会话环境里的一项。
+
+    上游把它存在 contextvar 里，网关按这一轮在 Agent 线程的 context 里绑定，MCP 的工具线程拷着那份
+    context 跑，所以看到的是这一轮自己的值。这一份 context 里从没绑过时（``_UNSET``），上游回落到
+    ``os.environ`` 的旧值；清掉是绑成空串，这时拿到的是空串，不再回落。
+    """
     try:
         from gateway.session_context import get_session_env
     except Exception:
@@ -134,11 +143,11 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
             logger.debug("算会话键失败：%r", exc)
     found = {
         "sender": sender,
+        "source": source,
         "session_key": session_key,
         "room": room,
         "thread": getattr(source, "thread_id", None) or None,
         "event_id": getattr(event, "message_id", None) or getattr(event, "id", None),
-        "fresh": True,
     }
     if sid:
         _S["origins"][sid] = found
@@ -152,6 +161,11 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
 def _origin(session_id):
     found = _S["origins"].get(session_id)
     if found is not None:
+        # 同一条会话的下一句：记在 pending 里的是这一句的消息和来源，盖掉上一轮的
+        # （被打断或重置以后 peek 不到会话 id，pre_gateway_dispatch 只写 pending）。
+        fresh = _S["pending"].pop(found.get("session_key"), None)
+        if fresh is not None:
+            found.update(fresh)
         return found
     store = _S["session_store"]
     if store is None or not session_id:
@@ -181,19 +195,28 @@ def _origin(session_id):
 
 
 def _identity(session_id):
-    """这一轮替谁说话：报链准了用准了的那份，没报上时退回记下的来源。"""
+    """这一轮替谁说话，连同这份身份是哪来的。
+
+    按工具调用自己的会话号查这一轮的来源；说话人取不到时不做猜测，带会话号不带代表头，让核心按会话去认
+    ——猜错了卡片就挂到别人的链上。会话号也没有时返回 None，调用不带身份（核心的审计里看得到）。
+
+    会话结束以后迟到的调用只剩会话号这一支：核心对已结束的会话没有在跑的轮，会退到“封顶最严的轮”，
+    这条会话再开新链之前可能拿到别的说话人，和完全不带会话头一样，不是准的。
+    """
     active = _S["active"].get(session_id)
     if active is not None:
-        return active
+        return active, "会话环境"
     origin = _S["origins"].get(session_id)
-    if origin is None or not origin.get("sender"):
-        return None
-    return {
-        "sender": origin["sender"],
-        "session": session_id,
-        "room": origin.get("room"),
-        "thread": origin.get("thread"),
-    }
+    if origin is not None:
+        return {
+            "sender": origin.get("sender"),
+            "session": session_id,
+            "room": origin.get("room"),
+            "thread": origin.get("thread"),
+        }, "来源记录"
+    if session_id:
+        return {"sender": None, "session": session_id, "room": None, "thread": None}, "只有会话"
+    return None, "无"
 
 
 def pre_llm_call(session_id="", sender_id="", **_):
@@ -212,10 +235,14 @@ def pre_llm_call(session_id="", sender_id="", **_):
     if origin.get("thread"):
         body["thread"] = origin["thread"]
     verdict, refusal, detail = _chain_start(body)
+    if verdict == "stopped":
+        # 报到的链已经停了（唤醒标签还指着它，常见于主人刚按下停止）：去掉消息 id 再报一次，
+        # 核心就按会话新开一条链。停了的链本来也不接新消息，叫回同样开新链。
+        body["event_id"] = ""
+        verdict, refusal, detail = _chain_start(body)
     if verdict == "retry":
         return None
     _S["reported"].add(session_id)
-    origin["fresh"] = False
     if verdict == "grant":
         _S["active"][session_id] = {
             "sender": sender,
@@ -230,7 +257,7 @@ def pre_llm_call(session_id="", sender_id="", **_):
     # 其他拒绝：链没开成，也要报 End，让核心把这轮放掉。
     _S["ending"].add(session_id)
     logger.info("核心不收这一轮（%r）：%s", refusal, detail)
-    return {"action": "block", "message": _refusal_text(refusal, sender)}
+    return {"action": "block", "message": _refusal_text(refusal, sender, detail)}
 
 
 def _language(sender):
@@ -262,22 +289,35 @@ def _language(sender):
     return box["lang"]
 
 
-def _refusal_text(refusal, sender):
-    """核心的拒绝类别换成给说话人看的一句话。"""
+def _refusal_text(refusal, sender, detail=""):
+    """核心的拒绝类别换成给说话人看的一句话。
+
+    类别说不清的地方（``invalid_input`` 没给 refusal、``other`` 什么都可能是）把核心给的说明接在后面。
+    会话挂在别的链上、卡片已登记这类核心错误走的是 ``other``，类型分类只在响应头 ``x-wonton-error``
+    里，插件只读响应体，所以落到下面泛泛的那句。
+    """
     lang = _language(sender)
     kind = refusal.get("type")
     if kind == "permission_denied":
-        return CHAIN_DENIED[lang]
-    if kind == "busy":
-        return CHAIN_BUSY[lang]
-    if kind == "invalid_input":
-        return CHAIN_SELF[lang] if refusal.get("refusal") == "self_call" else CHAIN_LOOP[lang]
-    return CHAIN_LIMIT[lang]
+        text = CHAIN_DENIED[lang]
+        return f"{text}\n\n{detail}" if detail else text
+    if kind == "limit_reached":
+        return CHAIN_LIMIT[lang]
+    if kind == "invalid_input" and refusal.get("refusal") == "self_call":
+        return CHAIN_SELF[lang]
+    if kind == "invalid_input" and refusal.get("refusal") == "loop":
+        return CHAIN_LOOP[lang]
+    text = CHAIN_OTHER[lang]
+    return f"{text}\n\n{detail}" if detail else text
 
 
 def on_session_end(session_id="", **_):
     """这一轮结束：清身份，报过的链报结束。"""
+    if _S["ending"] and session_id not in _S["ending"]:
+        logger.warning("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
     _S["active"].pop(session_id, None)
+    _S["unknown"].discard(session_id)
+    _S["unknown"].discard("")
     _S["reported"].discard(session_id)
     origin = _S["origins"].pop(session_id, None) or {}
     _S["pending"].pop(origin.get("session_key"), None)
@@ -352,8 +392,16 @@ def _install_headers():
         return
 
     async def call(server, *args, **kwargs):
-        turn = _identity(_session_id())
+        env = _session_id()
+        turn, source = _identity(env)
+        logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
         if turn is None:
+            if env not in _S["unknown"]:
+                _S["unknown"].add(env)
+                if env:
+                    logger.warning("这一轮的身份取不到（环境的会话 %r）：调用不带代表头和会话", env)
+                else:
+                    logger.warning("这一轮没有会话号，身份取不到：调用不带代表头和会话")
             return await original(server, *args, **kwargs)
         _patch_session(server.session)
         token = _CURRENT.set(turn)
@@ -376,7 +424,8 @@ def _patch_session(session):
         headers = dict(original_headers(name, arguments) or {})
         turn = _CURRENT.get()
         if turn:
-            headers[ON_BEHALF_OF] = turn["sender"]
+            if turn.get("sender"):
+                headers[ON_BEHALF_OF] = turn["sender"]
             headers[SESSION] = turn["session"]
         return headers
 
@@ -387,7 +436,9 @@ def _patch_session(session):
         turn = _CURRENT.get()
         if turn and "meta" not in kwargs:
             origin = {name: turn[key] for key, name in (("room", "room_id"), ("thread", "thread_id")) if turn.get(key)}
-            kwargs["meta"] = {ORIGIN: origin}
+            if origin:
+                # 核心的 origin 要求 room_id；只有会话号时塞空的 {} 反而解析不了，不带。
+                kwargs["meta"] = {ORIGIN: origin}
         return await original_call(name, arguments, *args, **kwargs)
 
     session.call_tool = call_tool
@@ -457,6 +508,16 @@ async def _receipt(item_id, result, client=None):
     response.raise_for_status()
 
 
+def _release_slot(runner, session_key):
+    """打断这一轮但不依赖它的清会话钩子：只放槽，走在跑的上游驱逐同一对调用。"""
+    generation = runner._interrupt_running_turn(
+        session_key,
+        interrupt_reason="云吞停链",
+        invalidation_reason="wonton_chain_stopped",
+    )
+    runner._drop_turn_slot(session_key, run_generation=generation)
+
+
 async def _do_outbox(item, client=None):
     item_id = item.get("id")
     kind = item.get("kind") or {}
@@ -464,13 +525,28 @@ async def _do_outbox(item, client=None):
         session = kind.get("session") or ""
         origin = _origin(session) or {}
         session_key = origin.get("session_key")
+        source = origin.get("source")
         runner = _runner()
         if session_key and runner is not None:
-            runner._interrupt_running_turn(
-                session_key,
-                interrupt_reason="云吞停链",
-                invalidation_reason="wonton_chain_stopped",
-            )
+            clear = getattr(runner, "_interrupt_and_clear_session", None)
+            try:
+                if clear is not None and source is not None:
+                    # 和 /stop 走同一条路：光打断不停用那一轮的槽，槽一直占着，之后的消息全被当成“忙”排队，没人放。
+                    await clear(
+                        session_key,
+                        source,
+                        interrupt_reason="云吞停链",
+                        invalidation_reason="wonton_chain_stopped",
+                    )
+                else:
+                    _release_slot(runner, session_key)
+            except Exception as exc:
+                # 清会话时抛了异常也要把槽放掉；核心不重发 CancelTurn，槽占着就再也轮不到这一会话。
+                logger.warning("停链时清会话失败 %s：%r", session, exc)
+                try:
+                    _release_slot(runner, session_key)
+                except Exception as slot_exc:
+                    logger.warning("停链时放轮次槽也失败 %s：%r", session, slot_exc)
             await _receipt(item_id, {"result": "sent", "event_id": ""}, client)
         else:
             await _receipt(item_id, {"result": "failed", "category": "other"}, client)

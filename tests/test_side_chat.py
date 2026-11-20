@@ -64,30 +64,28 @@ class Event:
         self.text, self.source = text, source
 
 
-class Members:
-    def __init__(self, members):
-        self.members = members
-
-
 class FakeClient:
     def __init__(self):
         self.state_events = []
         self.roots = {}
         self.members = {}
 
-    async def send_state_event(self, room, event_type, content, state_key=""):
-        self.state_events.append((room, event_type, content, state_key))
+    async def send_state_event(self, room_id, event_type, content, state_key="", **kwargs):
+        self.state_events.append((room_id, event_type, content, state_key))
         return "$st1"
 
-    async def get_event(self, room, event_id):
+    async def get_event(self, room_id, event_id):
         if event_id not in self.roots:
             raise RuntimeError(f"event {event_id} not found")
         return self.roots[event_id]
 
-    async def joined_members(self, room):
-        if room not in self.members:
-            raise RuntimeError(f"no members for {room}")
-        return self.members[room]
+    async def get_joined_members(self, room_id):
+        if room_id not in self.members:
+            raise RuntimeError(f"no members for {room_id}")
+        return self.members[room_id]
+
+    async def get_state_event(self, room_id, event_type, state_key="", **kwargs):
+        return {}
 
 
 class RootEvent:
@@ -312,8 +310,8 @@ class Case(unittest.IsolatedAsyncioTestCase):
 
     async def test_declaration_enumerates_dm_rooms_by_member_count(self):
         self.adapter._joined_rooms = {ROOM, "!group:example.org"}
-        self.client.members = {ROOM: Members([OWNER, BOT]),
-                               "!group:example.org": Members([OWNER, BOT, "@c:example.org"])}
+        self.client.members = {ROOM: {OWNER: None, BOT: None},
+                               "!group:example.org": {OWNER: None, BOT: None, "@c:example.org": None}}
         await self.dispatch("群房里的一句", chat_type="group")
         await self.drain()
         self.assertEqual([event[0] for event in self.client.state_events], [ROOM])
