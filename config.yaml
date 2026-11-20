@@ -1,47 +1,9 @@
 # Wonton 给 Hermes 的初始配置：首次启动时由 init 服务写成数据目录里的 config.yaml，之后不覆盖
 # （Hermes 自己也会改写它，比如 /model）。
 #
-# 默认经 magpie 使用模型。地址、凭据和默认模型来自核心注入的环境变量，Hermes 会展开 ${VAR}：
-#   WONTON_MODEL_BASE_URL  magpie 网关的 OpenAI 兼容地址
-#   WONTON_MODEL_API_KEY   magpie 发给本插件的网关凭据（Hermes 用 key_env 读取，不落盘）
-#   WONTON_MODEL_DEFAULT   默认模型，指向 magpie 的路由组；换 provider 或模型只在 magpie 里改
-model:
-  provider: custom:magpie
-  default: ${WONTON_MODEL_DEFAULT}
-
-providers:
-  magpie:
-    api: ${WONTON_MODEL_BASE_URL}
-    key_env: WONTON_MODEL_API_KEY
-    transport: chat_completions
-    # 网关凭据只允许用默认路由组，列模型没有意义。
-    discover_models: false
-    models:
-      - ${WONTON_MODEL_DEFAULT}
-    # 路由组里各成员窗口的下限；Hermes 要求至少 64K。
-    context_length: 128000
-
-# 辅助任务跟随主模型，避免上游自动发现其他服务商；主人切换主模型时不强行切回网关。
-auxiliary:
-  vision: &wonton_model {provider: main}
-  compression: {<<: *wonton_model}
-  skills_hub: {<<: *wonton_model}
-  approval: {<<: *wonton_model}
-  review: {<<: *wonton_model}
-  mcp: {<<: *wonton_model}
-  title_generation: {<<: *wonton_model}
-  memory_query_rewrite: {<<: *wonton_model}
-  tts_audio_tags: {<<: *wonton_model}
-  voice_chat: {<<: *wonton_model}
-  triage_specifier: {<<: *wonton_model}
-  kanban_decomposer: {<<: *wonton_model}
-  profile_describer: {<<: *wonton_model}
-  goal_judge: {<<: *wonton_model}
-  curator: {<<: *wonton_model}
-  monitor: {<<: *wonton_model}
-  background_review: {<<: *wonton_model}
-  moa_reference: {<<: *wonton_model}
-  moa_aggregator: {<<: *wonton_model}
+# 不写 model：模型用 Hermes 自带的供应商接入，主人在插件网页的 Keys 页填 API key 或登录订阅、
+# 在 Models 页选模型，Hermes 自己写回这份配置。没选模型时 wonton 插件回一句去哪里设，不调模型。
+# 辅助任务（压缩、视觉、审批守卫等）用上游默认的 auto：跟随主模型，只走主人配了的 fallback，不猜别的服务商。
 
 # Matrix 的行为设置（身份和令牌由核心经环境变量注入）。只收发消息：不加处理中的表情回应、
 # 房间里不自动开线程，重启前后也不往聊天里发状态消息。
@@ -111,8 +73,8 @@ approvals:
        absolute paths elsewhere are outside).
     Everything not listed here follows the base rules above.
 
-# Wonton 的 Hermes 插件（包里的 wonton/，init 服务放进数据目录）：模型网关里还没有默认模型时，直接告诉主人去
-# 「模型设置」添加模型服务商，不把网关的报错发进聊天。
+# Wonton 的 Hermes 插件（包里的 wonton/，init 服务放进数据目录）：还没选模型时直接告诉主人去插件网页的 Keys 和
+# Models 页设置，不把上游“去终端跑 hermes model”的报错发进聊天。
 plugins:
   enabled: [wonton]
 

@@ -1,31 +1,19 @@
 """给主人的提示和旁聊发回主时间线的文字，四种语言各一条。
 
-入口名照 App 里实际显示的写：「应用 → 模型设置」和「Apps → Models」。模型设置的清单只有中文和英文，
-繁中界面显示简体标题，日文界面显示英文标题，所以这两条这样写；和 App 的清单一起改。
+入口照 App 里实际显示的写：「应用 → <插件标题>」打开 Hermes 的网页，Keys、Models 是网页侧栏的名字。清单的标题只有中文和
+英文，繁中界面显示简体标题，日文界面显示英文标题；Hermes 网页默认英文，所以页名都写英文。和清单的 title 一起改。
 
 旁聊的引号沿用 ACP 桥的话题文字（四种语言都用「」，见 wonton-acp-bridge 的 locales/*/topics.ftl）。
 """
-NO_GATEWAY = {
-    "en": "The model gateway isn't ready yet. Open Apps → Models to check it, then message me again.",
-    "zh-Hans": "模型网关还没准备好，请在「应用 → 模型设置」里检查后再给我发消息。",
-    "zh-Hant": "模型閘道還沒準備好，請在「應用程式 → 模型设置」裡檢查後再傳訊息給我。",
-    "ja": "モデルゲートウェイの準備ができていません。アプリ → Models で確認してから、もう一度送ってください。",
-}
-
-
-NO_MODELS = {
-    "en": "No model is available yet: add a model provider and its API key in Apps → Models, then message me again.",
-    "zh-Hans": "还没有可用的模型：请在「应用 → 模型设置」里添加一个模型服务商和它的 API key，再给我发消息。",
-    "zh-Hant": "還沒有可用的模型：請在「應用程式 → 模型设置」裡新增模型供應商和它的 API 金鑰，再傳訊息給我。",
-    "ja": "利用できるモデルがまだありません。アプリ → Models でモデルプロバイダーと API キーを追加してから、もう一度送ってください。",
-}
-
-# {model} 是网关注入的不透明模型 ID，原样回显即可；不解释它的前缀或网关内部的路由结构。
-NO_DEFAULT = {
-    "en": "The default model {model} isn't available: check or pick a model in Apps → Models, then message me again.",
-    "zh-Hans": "默认模型 {model} 不可用：请在「应用 → 模型设置」里检查或换一个模型，再给我发消息。",
-    "zh-Hant": "預設模型 {model} 不可用：請在「應用程式 → 模型设置」裡檢查或換一個模型，再傳訊息給我。",
-    "ja": "既定のモデル {model} は利用できません。アプリ → Models でモデルを確認するか、別のモデルを選んでから、もう一度送ってください。",
+NO_MODEL = {
+    "en": "No model is set up yet: open Apps → All-Purpose Bot (Hermes), add an AI provider under Keys (fill in its "
+    "API key or sign in), pick a model under Models, then message me again.",
+    "zh-Hans": "还没有设置模型：请打开「应用 → AI 管家（Hermes）」，在 Keys 页新加一个模型服务商、填它的 API key 或登录订阅，"
+    "再在 Models 页选一个模型，然后再给我发消息。",
+    "zh-Hant": "還沒有設定模型：請打開「應用程式 → AI 管家（Hermes）」，在 Keys 頁新增一個模型供應商、填入它的 API 金鑰或登入訂閱，"
+    "再在 Models 頁選一個模型，然後再傳訊息給我。",
+    "ja": "モデルがまだ設定されていません。「アプリ → All-Purpose Bot (Hermes)」を開き、Keys で AI サービスを新しく追加し"
+    "（API キーを入力するかサブスクリプションでログイン）、Models でモデルを選んでから、もう一度送ってください。",
 }
 
 # 旁聊结果行的 body（旁聊约定的样例：旁聊「标题」：已完成）。state 用英文码进结构化字段，

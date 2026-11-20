@@ -1,12 +1,10 @@
 """Wonton 给 Hermes 的钩子。
 
-模型网关没接上（注入的模型变量为空）、或网关里还没有默认模型时（主人还没在「模型设置」里添加模型服务商），
-直接回一句该怎么做，不调模型。提示按说话人自己的语言写（核心按人记着 App 的语言），只有一种，不把几种语言拼在一起。
-
-不拦的话，网关的报错会原样发进聊天：magpie 说没有这个模型的报错很长，绕过了 Hermes 对模型报错的改写。
-
-每条消息先问一次网关有哪些模型（同一个 Docker 网络里，几毫秒）：主人加了 key，下一条消息就照常回答，不用重启。
-网关连不上、回答不对时不拦，交给 Hermes 照常处理和报错，这里不猜原因。
+还没选模型时（config.yaml 里没有 model.default，和上游 /health/detailed 的 model 检查同一判据），直接回一句去插件网页的
+Keys、Models 页设置，不调模型。不拦的话，上游的报错叫主人去终端跑 `hermes model`，云吞里没有这个终端。
+提示按说话人自己的语言写（核心按人记着 App 的语言），只有一种，不把几种语言拼在一起。
+每条消息读一次配置：主人在网页里选好模型，下一条消息就照常回答，不用重启。选了模型但 key 无效、服务商出错的，
+交给 Hermes 照常处理，它的短报错经 locales/ 改写成指向同一个网页。
 
 每轮带上收发文件的办法。收文件：主人用 App 发的文件是正文里的 wonton://file/<编号>，Hermes 只看到文字；PDF 这类
 wonton__view_file 读不了时，模型会让主人「作为附件再发一次」，主人照做还是一样，所以要它照实说读不了。存文件：存进共享文件夹后
@@ -23,13 +21,10 @@ wonton__view_file 读不了时，模型会让主人「作为附件再发一次�
 """
 
 import logging
-import os
 from pathlib import Path
 
-import httpx
-
 from .locale import language
-from .texts import NO_DEFAULT, NO_GATEWAY, NO_MODELS
+from .texts import NO_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -66,49 +61,41 @@ WONTON_APPS = (
 
 
 async def missing_model_hint(text="", source=None, **_):
-    """``post_gateway_admission``：默认模型不在网关的模型列表里时，回复提示，这条消息不再交给模型。"""
-    if text.lstrip().startswith("/"):
+    """``post_gateway_admission``：还没选模型时回复提示，这条消息不再交给模型。"""
+    if text.lstrip().startswith("/") or _model_configured():
         return None
     source = source or {}
     user = source.get("user_id")
     sender = user if source.get("platform") == "matrix" and isinstance(user, str) and user.startswith("@") else None
-    base = os.environ.get("WONTON_MODEL_BASE_URL", "").rstrip("/")
-    key = os.environ.get("WONTON_MODEL_API_KEY", "")
-    model = os.environ.get("WONTON_MODEL_DEFAULT", "")
-    if not _gateway_provider_active():
-        return None
-    if not (base and key and model):
-        return {"action": "handled", "reply": NO_GATEWAY[await language(sender)]}
-    try:
-        # 网关在插件网络里，不走代理环境变量（Hermes 的 gateway.trust_env 也是关的）。
-        async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
-            response = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"})
-            response.raise_for_status()
-            ids = {item["id"] for item in response.json()["data"]}
-    except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
-        logger.warning("查询模型网关的模型列表失败，照常交给 Hermes：%r", e)
-        return None
-    if model in ids:
-        return None
-    lang = await language(sender)
-    if ids:
-        reply = NO_DEFAULT[lang].format(model=model)
-    else:
-        reply = NO_MODELS[lang]
-    return {"action": "handled", "reply": reply}
+    return {"action": "handled", "reply": NO_MODEL[await language(sender)]}
 
 
-def _gateway_provider_active() -> bool:
-    """主人的模型还配在网关这个 provider 上才算（配置读不出来时不拦，不误导）。"""
+def _model_configured() -> bool:
+    """配置里有没有主模型，判据同上游 gateway.run._resolve_gateway_model（不含只在桌面版领取的试用模型）。
+    配置读不出来时当作选了：不确定就交给 Hermes 照常处理和报错，不误导主人去重设。"""
     try:
         from hermes_cli.config import load_config_readonly
 
-        model_cfg = (load_config_readonly() or {}).get("model") or {}
-        provider = str(model_cfg.get("provider") or "").strip()
+        config = load_config_readonly() or {}
+        model = config.get("model")
     except Exception:
-        logger.warning("读 config.yaml 里的模型 provider 失败，不当成网关处理", exc_info=True)
+        logger.warning("读 config.yaml 里的模型失败，交给 Hermes 照常处理", exc_info=True)
+        return True
+    provider = model.get("provider") if isinstance(model, dict) else None
+    if isinstance(model, dict):
+        model = model.get("default") or model.get("model")
+    if not isinstance(model, str) or not model.strip():
         return False
-    return provider in ("", "magpie", "custom:magpie")
+    # 升级上来的配置留着上一版写的占位符：核心不再注入这些变量，Hermes 展开不了就原样留着，请求会打到字面地址。
+    # 当作没配，让提示带主人去网页重设。选中的服务商地址也可能是占位符（只把模型改成真值时）：
+    if "${" in model:
+        return False
+    providers = config.get("providers")
+    if isinstance(provider, str) and provider.startswith("custom:") and isinstance(providers, dict):
+        api = providers.get(provider.removeprefix("custom:"))
+        if isinstance(api, dict) and "${" in str(api.get("api", "")):
+            return False
+    return True
 
 
 def send_files_context(**_):

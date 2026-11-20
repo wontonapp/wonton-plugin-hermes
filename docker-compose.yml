@@ -1,7 +1,7 @@
 # Hermes：云吞的默认 Agent。核心镜像带着同一份，核心第一次启动时自动装上；这个仓库让主人卸掉以后还能从商店装回来。
 #
-# Hermes 用自带的 Matrix 平台以 bot 身份登录 Tuwunel；默认模型经模型网关（magpie）。
-# 网关未就绪时提示主人检查模型设置，不自动改用其他服务商。
+# Hermes 用自带的 Matrix 平台以 bot 身份登录 Tuwunel；模型用 Hermes 自带的供应商接入，主人在插件网页的
+# Keys 页填 key 或登录订阅、Models 页选模型。不申请 models：不依赖云吞的模型网关，没装网关也照样装、照样用。
 # 每个 Bot 一组 init + gateway + web 容器（x-wonton.bots）：Hermes 的 profile 不隔离文件系统，
 # 不同人的 Bot 不能共用一个容器。
 name: hermes
@@ -28,10 +28,6 @@ services:
         /opt/hermes/.venv/bin/python /seed/init_config.py &&
         chown -R ${PUID}:${PGID} /opt/data/skills /opt/data/plugins /opt/data/hooks/wonton-language
     environment:
-      # 模型变量由核心注入；已有模型配置由主人管理。
-      WONTON_MODEL_BASE_URL: ${WONTON_MODEL_BASE_URL}
-      WONTON_MODEL_API_KEY: ${WONTON_MODEL_API_KEY}
-      WONTON_MODEL_DEFAULT: ${WONTON_MODEL_DEFAULT}
       # 平台 extra 里的 allow_admin_from 占位符由 init 换成这个值（Hermes 不展开 extra 的 ${VAR}）。
       WONTON_MATRIX_ALLOWED_USERS: ${WONTON_MATRIX_ALLOWED_USERS:?需要主人的 Matrix 用户 ID}
       # 国内 IM 渠道开关（插件设置，true/false）：init 据此在 config.yaml 里写或撤显式停用（见 init_config.py）。
@@ -129,10 +125,6 @@ services:
       MATRIX_E2EE_MODE: required
       # 交叉签名的恢复密钥写在这里，核心收走保管（x-wonton.secrets.matrix_recovery_key）。
       MATRIX_RECOVERY_KEY_OUTPUT_FILE: /opt/data/platforms/matrix/recovery-key.txt
-      # models：模型网关的地址、只属于这个 Bot 的网关凭据和默认模型，config.yaml 里引用。
-      WONTON_MODEL_BASE_URL: ${WONTON_MODEL_BASE_URL}
-      WONTON_MODEL_API_KEY: ${WONTON_MODEL_API_KEY}
-      WONTON_MODEL_DEFAULT: ${WONTON_MODEL_DEFAULT}
       # tools：核心的 MCP 总线（核心和其他插件的工具），config.yaml 的 mcp_servers.wonton 引用。
       WONTON_MCP_URL: ${WONTON_MCP_URL}
       # owner.identity：说话人是主人时不用再退一级问主人的语言。核心只在被引用时才注入。
@@ -216,7 +208,7 @@ configs:
 x-wonton:
   spec: "0.12"
   id: com.nousresearch.hermes
-  version: 0.7.7
+  version: 0.8.0
   kind: agent
   title: { zh: AI 管家（Hermes）, en: All-Purpose Bot (Hermes) }
   description:
@@ -233,32 +225,33 @@ x-wonton:
     zh: |
       Nous Research 家的通用 AI 助手：在 App 里和它私聊，它能上网查资料、用你装的应用提供的工具、读你允许它看的文件夹。
 
-      消息走加密的 Matrix 私聊。默认使用“模型设置”里配好的模型；模型网关还没准备好时会提示你检查，不会偷偷换成别的服务。经云吞装卸插件这类操作要你在卡片上确认；Hermes 自带的终端、文件和浏览器工具在它自己的容器里直接运行，能读写这个 Bot 的数据（含密钥）、能联网，碰不到你的共享文件夹和别的插件的数据。
+      消息走加密的 Matrix 私聊。模型用 Hermes 自带的接入：打开它的网页，在 Keys 页填 AI 服务商的 API key 或登录订阅，再在 Models 页选模型；没选好之前它会告诉你去哪里设，不会偷偷换成别的服务。key 和登录信息存在这个 Bot 自己的数据里。经云吞装卸插件这类操作要你在卡片上确认；Hermes 自带的终端、文件和浏览器工具在它自己的容器里直接运行，能读写这个 Bot 的数据（含密钥）、能联网，碰不到你的共享文件夹和别的插件的数据。
 
       国内办公 IM 渠道（飞书、钉钉、企业微信、QQ 机器人、个人微信）在插件详情页的「设置」里逐个启用：去对应平台的
       开放平台建一个机器人应用，把应用 ID 和密钥填进来、打开开关。这些聊天只出现在那个 IM 里，不进云吞 App 的聊天页；
-      个人微信只支持私聊，而且要先在服务器的终端里扫码登录（步骤见插件 README）。Telegram 仍在 Hermes 原生 Channels 页
+      个人微信只支持私聊，而且要先在服务器的终端里扫码登录（步骤见插件 README）。Telegram 在 Hermes 网页的 Channels 页
       配置，使用云吞的出网代理。
     en: |
       An all-round AI assistant by Nous Research: chat with it privately in the app, and it can search the web, use the tools your apps provide and read the folders you allow.
 
-      Messages travel in an encrypted Matrix chat. By default it uses the model configured in Models; if the model gateway is not ready, it asks you to check rather than silently switching services. Actions through Wonton, such as installing plugins, wait for your confirmation card. Hermes's terminal, file and browser tools run directly in its container: they can read and write this Bot's data, including secrets, and access the network, but not your shared folders or other apps' data.
+      Messages travel in an encrypted Matrix chat. It uses Hermes's own model setup: open its web page, add an AI provider's API key or sign in under Keys, then pick a model under Models; until then it tells you where to set it up rather than silently switching services. Keys and sign-ins are stored in this Bot's own data. Actions through Wonton, such as installing plugins, wait for your confirmation card. Hermes's terminal, file and browser tools run directly in its container: they can read and write this Bot's data, including secrets, and access the network, but not your shared folders or other apps' data.
 
-      CN office-IM channels (Feishu, DingTalk, WeCom, QQ bot, personal WeChat) are enabled one by one in the plugin's settings: create a bot app on the platform's console, fill in the app ID and secret, and turn the switch on. These chats live only in that IM, not in the Wonton app's chat page; personal WeChat supports direct messages only and needs a one-time scan login from a terminal on the server (steps in the plugin README). Telegram is still configured in Hermes' native Channels page and uses Wonton's outbound proxy.
+      CN office-IM channels (Feishu, DingTalk, WeCom, QQ bot, personal WeChat) are enabled one by one in the plugin's settings: create a bot app on the platform's console, fill in the app ID and secret, and turn the switch on. These chats live only in that IM, not in the Wonton app's chat page; personal WeChat supports direct messages only and needs a one-time scan login from a terminal on the server (steps in the plugin README). Telegram is configured on the Channels page of the Hermes web page and uses Wonton's outbound proxy.
   release_notes:
-    zh: "修好了停链、发私聊和认人：在 App 里停链能马上打断手头的事，批准过的私聊会真的发出去，别人派活过来时它知道是谁。链到上限或者已经停了时，会回一句话说清原因。"
-    zh-Hant: "修好了停鏈、發私聊和認人：在 App 裡停鏈能馬上打斷手頭的事，批准過的私聊會真的發出去，別人派活過來時它知道是誰。鏈到上限或者已經停了時，會回一句話說清原因。"
-    en: "Fixed stopping, sending and knowing who is talking: stopping a chain in the app now interrupts what it is doing, approved direct messages really go out, and it knows who sent work down a chain. When a chain is at its limit or has been stopped, it answers with a short line saying why."
-    ja: "停止・送信・相手の識別を直しました。アプリでチェーンを止めると作業がすぐ中断され、承認済みの DM は実際に送られ、チェーンで仕事を回してきた相手も分かります。上限や停止のときは理由を一言返します。"
+    zh: "模型改用 Hermes 自带的接入，不再经模型网关 magpie：打开它的网页，在 Keys 页填 key 或登录订阅，再在 Models 页选模型。修好了停链、发私聊和认人：在 App 里停链能马上打断手头的事，批准过的私聊会真的发出去，别人派活过来时它知道是谁。链到上限或者已经停了时，会回一句话说清原因。"
+    zh-Hant: "模型改用 Hermes 自帶的接入，不再經模型閘道 magpie：打開它的網頁，在 Keys 頁填入金鑰或登入訂閱，再在 Models 頁選模型。修好了停鏈、發私聊和認人：在 App 裡停鏈能馬上打斷手頭的事，批准過的私聊會真的發出去，別人派活過來時它知道是誰。鏈到上限或者已經停了時，會回一句話說清原因。"
+    en: "Models now use Hermes's own setup instead of the magpie model gateway: open its web page, add a key or sign in under Keys, then pick a model under Models. Fixed stopping, sending and knowing who is talking: stopping a chain in the app now interrupts what it is doing, approved direct messages really go out, and it knows who sent work down a chain. When a chain is at its limit or has been stopped, it answers with a short line saying why."
+    ja: "モデルは magpie モデルゲートウェイを経由せず、Hermes 自身の設定を使います。ウェブページを開き、Keys でキーを入力するかログインしてから、Models でモデルを選んでください。停止・送信・相手の識別を直しました。アプリでチェーンを止めると作業がすぐ中断され、承認済みの DM は実際に送られ、チェーンで仕事を回してきた相手も分かります。上限や停止のときは理由を一言返します。"
   agent:
     protocol: matrix
   bot:
     display_name: { zh: Hermes, en: Hermes }
   # 原生回环 dashboard 不另建账号；主人会话由核心网关校验，不开放局域网端口。
+  # 打开就落在 Models 页：装好后第一件事是选模型，没有可选的供应商时上游页面会指去 Keys。
   webui:
     service: gateway
     port: 8080
-    path: /channels
+    path: /models
     sso: none
   # nginx 在 gateway 的命名空间监听 8080；入口指向 default Bot 的网络目标服务。
   bots:
@@ -290,7 +283,6 @@ x-wonton:
         url: https://q.qq.com/
         required: false
   permissions:
-    - models
     - matrix.bot
     # 经核心的 MCP 总线用工具：装卸插件、在授权的文件夹里找文件等。
     - tools
