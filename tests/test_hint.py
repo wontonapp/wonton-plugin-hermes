@@ -156,6 +156,19 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(await self.hint())
         self.assertEqual(self.fake.calls, [])
 
+    async def test_unexpanded_placeholder_still_prompts(self):
+        # 0.7.6 的配置：升级不覆盖 config.yaml，三个变量也不再注入，占位符会原样留下。
+        for model in (
+            {"provider": "custom:magpie", "default": "${WONTON_MODEL_DEFAULT}"},
+            {"model": "${WONTON_MODEL_DEFAULT}"},
+            {"provider": "custom:magpie", "default": "${WONTON_MODEL_DEFAULT}/default"},
+            "${WONTON_MODEL_DEFAULT}",
+        ):
+            with self.subTest(model=model), mock.patch.object(
+                config, "load_config_readonly", return_value={"model": model}
+            ):
+                self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
+
     async def test_provider_without_model_still_prompts(self):
         with mock.patch.object(config, "load_config_readonly", return_value={"model": {"provider": "openrouter"}}):
             self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])

@@ -188,8 +188,8 @@ x-wonton:
   域名或 GitHub 用户名开头，如 `app.alice.photos`。把 `.` 换成 `-` 就是插件的 slug（`app-alice-photos`），网页地址和
   Docker 里的资源名都用它。
 - `version` 是插件包的版本（语义化版本），和应用、镜像的版本无关。
-- `kind`：`app`（应用）、`agent`（Agent）、`channel`（第三方 IM 渠道）、`model`（模型服务）。`system` 只给随核心预装的
-  官方插件。
+- `kind`：`app`（应用）、`agent`（Agent）、`channel`（第三方 IM 渠道）、`model`（模型服务）。`system` 只给官方插件，
+  可以随核心预装，也可以从商店装。
 - `title`、`description` 至少写 `zh` 和 `en`。
 - `permissions` 必填，不要权限时写空列表。
 - `requirements` 可选：`arch`（如 `[amd64, arm64]`，和主人的服务器架构不符时装不上）、`memory`（如 `2G`）、
@@ -518,7 +518,7 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python httpx ruamel
 ```
 
 开发环境和正式安装用同一份 compose（核心、身份提供方 Ory Hydra、Matrix 服务器 Tuwunel），只是项目名、核心的容器名
-和实例名不同；核心起来后同样预装模型网关 magpie（`ai.usemagpie.magpie`）。第一次 `up` 时定下设置，写在 `.wonton/.env`：
+和实例名不同；核心不再预装模型网关 magpie（`ai.usemagpie.magpie`），要试网关时从开发索引装。第一次 `up` 时定下设置，写在 `.wonton/.env`：
 
 - 实例名（`WONTON_INSTANCE`）：默认是目录名（去掉 `wonton-plugin-` 前缀）加 4 位随机数。核心建的容器、网络和卷都带上它，
   如（示例）`wonton-template3f2a--app-example-hello--web`，再打上 `wonton.instance` 标签。几个人或几个 Agent 共用一台
@@ -539,7 +539,7 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python httpx ruamel
 - 实例名和基础域名定下后不能改：基础域名也是 Matrix 的服务器名，实例名改了就找不到已经装上的插件。要换就先 `purge`。
 - 共用一台 Docker 时只用这些脚本起停和清理，不要 `docker system prune`、`docker volume prune`，也不要动名字里不是自己实例名
   的容器、网络和卷。
-- 每套开发环境至少占 3 个 Docker 网络（核心一个，magpie 和每个插件各一个），Docker 默认的地址池大约 30 个。一台主机上
+- 每套开发环境至少占 3 个 Docker 网络（核心一个，每个插件各一个），Docker 默认的地址池大约 30 个。一台主机上
   开很多套、报 “all predefined address pools have been fully subnetted” 时，在 Docker 的 `daemon.json` 里把
   `default-address-pools` 配得更细（如 `/24`）。
 
