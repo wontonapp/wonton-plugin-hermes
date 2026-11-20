@@ -2,7 +2,7 @@
 
 云吞核心靠请求头知道 MCP 工具调用替谁说话、属于哪一轮：``X-Wonton-On-Behalf-Of`` 是说话人，
 ``wonton-session`` 是这一轮的会话，``app.wonton/origin`` 的 ``_meta`` 给房间和话题。Hermes 的 MCP
-客户端每轮不带这些，所以在工具处理器的调用上加；值来自会话环境（见下）。
+客户端每轮不带这些，所以在工具处理器的调用上加；值来自这一轮自己设的轮次上下文（见下）。
 
 开轮时向核心报链（``POST <核心>/agent/chains/<令牌>``，带 Bot 的 Matrix 令牌），核心按说话人验证，
 被拒时这一轮就以那条原因结束、不再推理；结束报 ``End``。核心停链时往出箱
@@ -10,10 +10,11 @@
 批准过的私聊消息（``Message``）由这里用 Bot 的 Matrix 客户端发出，出箱项 ID 当 Matrix 事务 ID，
 核心重发同一条不会发两遍。
 
-身份从 ``gateway.session_context`` 的会话环境取（``HERMES_SESSION_ID`` 等），不靠钩子里的
-contextvar：``pre_llm_call`` 在单独的线程里跑，它 set 的 contextvar 回到 Agent 线程就没了。工具处理器
-在 Agent 线程上跑，那里的会话环境是对的，``_run_on_mcp_loop`` 提交时上游用
-``asyncio.run_coroutine_threadsafe`` 复制调用方的 contextvars，所以处理器里 set 的值在 MCP 循环上也看得到。
+身份靠工具调用自己 context 里的 ``HERMES_SESSION_ID``：上游在 Agent 线程的 context 里按这一轮绑好它，
+MCP 的工具线程拷着那份 context 跑，所以拿到的是这一轮自己的会话号，同时几轮也不会串。
+``pre_llm_call`` 在别的线程、拷的上下文里跑，它设的 contextvar 回不到工具线程（0.22.7 实测 3/3 次工具调用
+都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 这张表，不靠“最近一轮”的进程级值。
+查不到就不带身份。
 
 上游没有插件能挂的“每次工具调用”钩子，只能包它内部的处理器调用；升级 Hermes 时先复查
 ``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` 和 ``mcp.client.session.ClientSession.call_tool``。
@@ -45,7 +46,6 @@ START_TIMEOUT = 5.0
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
 # 这一轮替谁说话：`pre_llm_call` 拿到准的会话号时在轮次的任务里设，工具调用和它同一条任务。
 # 会话环境里的会话号是 Agent 构造时写的，换一轮可能还没刷新，两条会话交错时会串号。
-_TURN = contextvars.ContextVar("wonton_own_turn", default=None)
 # 报链结束走后台单线程：钩子在网关事件循环里，同步请求会把所有会话卡住。
 _CHAIN_POSTS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="wonton-chain")
 
@@ -58,6 +58,7 @@ _S = {
     "active": {},    # 会话 id -> 准了的这一轮的 {sender, session, room, thread}
     "reported": set(),  # 这一轮已经报过链开始的会话 id
     "ending": set(),    # 结束时要报 End 的会话 id（准了和被拒的都要报）
+    "unknown": set(),   # 已经提醒过“身份取不到”的会话 id
     "worker": None,
     "warned": False,
 }
@@ -192,17 +193,12 @@ def _origin(session_id):
 def _identity(session_id):
     """这一轮替谁说话，连同这份身份是哪来的。
 
-    先看这一轮自己设的（轮次的任务里，准）；再按会话环境里的会话号查；两个都没有时，
-    只有一条会话在跑就认它；最后退回会话号记下的来源。
+    按工具调用自己的会话号查这一轮的来源；取不到时不做猜测，如实返回 None、调用不带身份（核心的审计里看得到），
+    不拿别的会话去猜——猜错了卡片就挂到别人的链上。
     """
-    turn = _TURN.get()
-    if turn is not None:
-        return turn, "轮次"
     active = _S["active"].get(session_id)
     if active is not None:
         return active, "会话环境"
-    if len(_S["active"]) == 1:
-        return next(iter(_S["active"].values())), "唯一在跑的会话"
     origin = _S["origins"].get(session_id)
     if origin is None or not origin.get("sender"):
         return None, "无"
@@ -220,12 +216,6 @@ def pre_llm_call(session_id="", sender_id="", **_):
     sender = sender_id or origin.get("sender")
     if not sender or not origin.get("room") or session_id in _S["reported"]:
         return None
-    _TURN.set({
-        "sender": sender,
-        "session": session_id,
-        "room": origin.get("room"),
-        "thread": origin.get("thread"),
-    })
     body = {
         "phase": "start",
         "session": session_id,
@@ -313,10 +303,10 @@ def _refusal_text(refusal, sender, detail=""):
 
 def on_session_end(session_id="", **_):
     """这一轮结束：清身份，报过的链报结束。"""
-    _TURN.set(None)
     if _S["ending"] and session_id not in _S["ending"]:
         logger.warning("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
     _S["active"].pop(session_id, None)
+    _S["unknown"].discard(session_id)
     _S["reported"].discard(session_id)
     origin = _S["origins"].pop(session_id, None) or {}
     _S["pending"].pop(origin.get("session_key"), None)
@@ -393,8 +383,12 @@ def _install_headers():
     async def call(server, *args, **kwargs):
         env = _session_id()
         turn, source = _identity(env)
-        logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
+        if source != "轮次":
+            logger.warning("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
         if turn is None:
+            if env not in _S["unknown"]:
+                _S["unknown"].add(env)
+                logger.warning("这一轮的身份取不到（环境的会话 %r）：调用不带代表头和会话", env)
             return await original(server, *args, **kwargs)
         _patch_session(server.session)
         token = _CURRENT.set(turn)

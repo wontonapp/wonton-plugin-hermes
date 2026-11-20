@@ -1,6 +1,7 @@
 """每轮身份头、调用链和出箱：用假的 MCP 会话、网关和核心 HTTP 验证协议字段。"""
 
 import asyncio
+import contextvars
 import json
 import sys
 import types
@@ -86,6 +87,15 @@ class Event:
     source = Source()
 
 
+class MomSource:
+    chat_id, platform, user_id, thread_id = MOM_ROOM, "matrix", MOM, None
+
+
+class MomEvent:
+    message_id = "$event-2"
+    source = MomSource()
+
+
 class Session:
     def __init__(self):
         self.headers = []
@@ -124,11 +134,12 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.store = Store()
         self.server = Server()
         self.env = {"HERMES_SESSION_ID": SID}
+        self.vars = {}  # 会话环境的 ContextVar（和上游 gateway.session_context 一样按 context 走）
         self.sent = []
         self.answer = None
         turn._S.update({
             "loop": None, "runner": None, "session_store": None, "origins": {}, "pending": {},
-            "active": {}, "reported": set(), "ending": set(), "worker": True,
+            "active": {}, "reported": set(), "ending": set(), "worker": True, "unknown": set(),
         })
         turn._install_headers()
         modules = mock.patch.dict("os.environ", {
@@ -148,10 +159,21 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(http.stop)
 
     def _context(self):
-        env = self.env
+        env, vars = self.env, self.vars
+
+        def get(name, default=""):
+            var = vars.get(name)
+            value = var.get() if var else ""
+            return value if value else env.get(name, default)
+
         module = types.ModuleType("gateway.session_context")
-        module.get_session_env = lambda name, default="": env.get(name, default)
+        module.get_session_env = get
         return module
+
+    def bind(self, name, value):
+        """在当前的 context 里绑一项会话环境（上游由 Agent 线程上的 set_session_vars 做）。"""
+        var = self.vars.setdefault(name, contextvars.ContextVar(name, default=""))
+        var.set(value)
 
     async def _language(self, sender):
         return "zh-Hans"
@@ -192,6 +214,34 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         await handlers._call_tool_racing_stdio_death(self.server, "x", {})
         self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], OWNER)
 
+    async def test_interleaved_turns_each_carry_their_own_identity(self):
+        # 上游把 pre_llm_call 放在别的线程里、用拷贝的 context 跑，工具调用在 Agent 线程自己的 context 里。
+        # 顺序 A 钩子、B 钩子、A 工具、B 工具，两边带的得各是各的。
+        loop = asyncio.get_running_loop()
+        a, b = contextvars.copy_context(), contextvars.copy_context()
+
+        def hook(ctx, sid, sender):
+            # 钩子的线程再拷一份：那里 set 的 contextvar 回不到 Agent 线程。
+            contextvars.copy_context().run(turn.pre_llm_call, session_id=sid, sender_id=sender)
+
+        async def call_in(ctx):
+            task = ctx.run(loop.create_task, handlers._call_tool_racing_stdio_death(self.server, "x", {}))
+            return await task
+
+        turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
+        turn.pre_gateway_dispatch(event=MomEvent(), session_store=self.store)
+        a.run(self.bind, "HERMES_SESSION_ID", SID)
+        b.run(self.bind, "HERMES_SESSION_ID", MOM_SID)
+        await loop.run_in_executor(None, hook, a, SID, OWNER)
+        await loop.run_in_executor(None, hook, b, MOM_SID, MOM)
+        await call_in(a)
+        await call_in(b)
+        owner_headers, mom_headers = self.server.session.headers[-2:]
+        self.assertEqual(owner_headers["X-Wonton-On-Behalf-Of"], OWNER)
+        self.assertEqual(owner_headers["wonton-session"], SID)
+        self.assertEqual(mom_headers["X-Wonton-On-Behalf-Of"], MOM)
+        self.assertEqual(mom_headers["wonton-session"], MOM_SID)
+
     async def test_a_second_session_does_not_take_over_the_firsts_identity(self):
         # 主人那一轮还开着，会话环境里的会话号也还指着它；妈妈那一轮这时开始，
         # 它的工具调用带的得是它自己。串号时卡片会挂到主人那条链上，停链撤不回。
@@ -200,6 +250,8 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.server.session.headers.clear()
 
         async def mom_turn():
+            # 妈妈这一轮的 Agent 线程绑的是它自己的会话号，工具线程拷的就是这份。
+            self.bind("HERMES_SESSION_ID", MOM_SID)
             turn.pre_llm_call(session_id=MOM_SID, sender_id=MOM)
             return await handlers._call_tool_racing_stdio_death(self.server, "x", {})
 
@@ -207,6 +259,17 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         headers = self.server.session.headers[0]
         self.assertEqual(headers["X-Wonton-On-Behalf-Of"], MOM)
         self.assertEqual(headers["wonton-session"], MOM_SID)
+
+    async def test_without_a_turn_a_lone_open_session_is_not_guessed(self):
+        # 环境里的会话号是别人的一轮占着的、本会话又没记下来源时不猜：宁可不带，也不挂到别人的链上。
+        await self.turn()
+        self.server.session.calls.clear()
+        self.server.session.headers.clear()
+        self.env.clear()
+        with self.assertLogs("wonton.turn", level="WARNING") as logs:
+            await handlers._call_tool_racing_stdio_death(self.server, "x", {})
+        self.assertNotIn("X-Wonton-On-Behalf-Of", self.server.session.headers[0])
+        self.assertIn("身份取不到", "\n".join(logs.output))
 
     async def test_end_clears_the_turn(self):
         await self.turn()
