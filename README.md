@@ -9,8 +9,8 @@
 ## 模型
 
 模型只用 Hermes 自带的供应商接入：插件不申请 `models`，不依赖云吞的模型网关，没装网关、网关坏了都照样
-装、照样用。主人在插件网页（打开即是 Hermes 的 Models 页）的 Keys 页填服务商的 API key 或登录订阅，再在 Models
-页选主模型；Hermes 把 key 写进这个 Bot 数据目录的 `.env`，模型写回 `config.yaml`。能接哪些服务商、怎么登录以镜像
+装、照样用。主人在插件网页（打开即是 Hermes 的 Models 页）的 Keys 页新加一个服务商、填它的 API key 或登录订阅，
+再在 Models 页选主模型；Hermes 把 key 写进这个 Bot 数据目录的 `.env`，模型写回 `config.yaml`。能接哪些服务商、怎么登录以镜像
 对应的上游版本为准（`website/docs/user-guide/configuring-models.md`、`hermes_cli/web_server_oauth.py`）。
 辅助任务用上游默认的 `auto`，跟随主模型。
 
