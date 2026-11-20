@@ -118,13 +118,6 @@ CHAIN_LOOP = {
     "ja": "この Bot はすでにチェーンの上流にいます。続けるには新しいチェーンが必要です。",
 }
 
-CHAIN_HELD = {
-    "en": "This conversation is still held by another chain. Say it again shortly.",
-    "zh-Hans": "这一轮的会话还挂在别的链上，稍后再说。",
-    "zh-Hant": "這一輪的會話還掛在別的鏈上，稍後再說。",
-    "ja": "この会話はまだ別のチェーンに握られています。少しあとで言い直してください。",
-}
-
 CHAIN_OTHER = {
     "en": "The core didn't accept this turn.",
     "zh-Hans": "核心这次没收下这一轮。",

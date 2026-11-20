@@ -14,8 +14,8 @@
 身份靠工具调用自己 context 里的 ``HERMES_SESSION_ID``：上游在 Agent 线程的 context 里按这一轮绑好它，
 MCP 的工具线程拷着那份 context 跑，所以拿到的是这一轮自己的会话号，同时几轮也不会串。
 ``pre_llm_call`` 在别的线程、拷的上下文里跑，它设的 contextvar 回不到工具线程（0.22.7 实测 3/3 次工具调用
-都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 这张表，不靠“最近一轮”的进程级值。
-查不到就不带身份。
+都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 和 ``_S["origins"]`` 两张表，不靠“最近一轮”的进程级值。
+只有会话号时带 ``wonton-session``、不带代表头，让核心按会话去认；连会话号也取不到才不带身份。
 
 上游没有插件能挂的“每次工具调用”钩子，只能包它内部的处理器调用；升级 Hermes 时先复查
 ``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` 和 ``mcp.client.session.ClientSession.call_tool``。
@@ -32,7 +32,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .locale import language
-from .texts import CHAIN_DENIED, CHAIN_HELD, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_OTHER, CHAIN_SELF, CHAIN_STOPPED
+from .texts import CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_OTHER, CHAIN_SELF, CHAIN_STOPPED
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ _S = {
     "active": {},    # 会话 id -> 准了的这一轮的 {sender, session, room, thread}
     "reported": set(),  # 这一轮已经报过链开始的会话 id
     "ending": set(),    # 结束时要报 End 的会话 id（准了和被拒的都要报）
-    "unknown": set(),   # 已经提醒过“身份取不到”的会话 id
+    "unknown": set(),   # 已经提醒过“身份取不到”的会话环境值；空串在每轮结束时重新提醒
     "worker": None,
     "warned": False,
 }
@@ -88,7 +88,12 @@ def _is_matrix(platform):
 
 
 def _session_var(name):
-    """会话环境里的一项：网关按这一轮绑定，工具处理器所在的 Agent 线程看得到。"""
+    """会话环境里的一项。
+
+    上游把它存在 contextvar 里，网关按这一轮在 Agent 线程的 context 里绑定，MCP 的工具线程拷着那份
+    context 跑，所以看到的是这一轮自己的值。这一份 context 里从没绑过时（``_UNSET``），上游回落到
+    ``os.environ`` 的旧值；清掉是绑成空串，这时拿到的是空串，不再回落。
+    """
     try:
         from gateway.session_context import get_session_env
     except Exception:
@@ -194,6 +199,9 @@ def _identity(session_id):
 
     按工具调用自己的会话号查这一轮的来源；说话人取不到时不做猜测，带会话号不带代表头，让核心按会话去认
     ——猜错了卡片就挂到别人的链上。会话号也没有时返回 None，调用不带身份（核心的审计里看得到）。
+
+    会话结束以后迟到的调用只剩会话号这一支：核心对已结束的会话没有在跑的轮，会退到“封顶最严的轮”，
+    这条会话再开新链之前可能拿到别的说话人，和完全不带会话头一样，不是准的。
     """
     active = _S["active"].get(session_id)
     if active is not None:
@@ -284,8 +292,9 @@ def _language(sender):
 def _refusal_text(refusal, sender, detail=""):
     """核心的拒绝类别换成给说话人看的一句话。
 
-    类别说不清的地方（同样的 ``invalid_input`` 既可能是绕圈，也可能是这一轮还挂在别的链上；
-    ``other`` 什么都可能是）把核心给的说明接在后面。
+    类别说不清的地方（``invalid_input`` 没给 refusal、``other`` 什么都可能是）把核心给的说明接在后面。
+    会话挂在别的链上、卡片已登记这类核心错误走的是 ``other``，类型分类只在响应头 ``x-wonton-error``
+    里，插件只读响应体，所以落到下面泛泛的那句。
     """
     lang = _language(sender)
     kind = refusal.get("type")
@@ -298,9 +307,6 @@ def _refusal_text(refusal, sender, detail=""):
         return CHAIN_SELF[lang]
     if kind == "invalid_input" and refusal.get("refusal") == "loop":
         return CHAIN_LOOP[lang]
-    if kind == "invalid_input":
-        # 剩下这种是会话已经登记在别的链上（核心给 ``Invalid`` 且不带 refusal）。
-        return CHAIN_HELD[lang]
     text = CHAIN_OTHER[lang]
     return f"{text}\n\n{detail}" if detail else text
 
@@ -311,6 +317,7 @@ def on_session_end(session_id="", **_):
         logger.warning("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
     _S["active"].pop(session_id, None)
     _S["unknown"].discard(session_id)
+    _S["unknown"].discard("")
     _S["reported"].discard(session_id)
     origin = _S["origins"].pop(session_id, None) or {}
     _S["pending"].pop(origin.get("session_key"), None)
@@ -429,7 +436,9 @@ def _patch_session(session):
         turn = _CURRENT.get()
         if turn and "meta" not in kwargs:
             origin = {name: turn[key] for key, name in (("room", "room_id"), ("thread", "thread_id")) if turn.get(key)}
-            kwargs["meta"] = {ORIGIN: origin}
+            if origin:
+                # 核心的 origin 要求 room_id；只有会话号时塞空的 {} 反而解析不了，不带。
+                kwargs["meta"] = {ORIGIN: origin}
         return await original_call(name, arguments, *args, **kwargs)
 
     session.call_tool = call_tool
