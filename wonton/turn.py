@@ -279,8 +279,9 @@ def _cron_identity(execution):
     A 让 Bot 建的任务就按 A 算，模型在工具子进程里改不了它。
 
     头是插件自报的，核心只核对“这个 Bot 听不听这个人”（和聊天轮一样）：创建者后来不听这个 Bot 了，核心按
-    认不出算、只读。平台不是正好 ``matrix``、没有创建者、任务没了都不带身份——那几样主人从日志里看不出，
-    所以各提醒一次。
+    认不出算、只读。平台不是正好 ``matrix``、没有创建者、任务没了都不带身份，那几样主人从日志里看不出，所以
+    各提醒一次；没有身份不等于只读，核心按 Bot 的归属人封顶（共享 Bot 按能用它的人里最低的那级），主人自己
+    的私有 Bot 照常是主人级。
 
     定时任务没有进行中的轮次，子代理也不是一轮，所以只带代表头，不带 ``wonton-session``。
     """
@@ -289,7 +290,7 @@ def _cron_identity(execution):
         _warn_cron("", None, "执行里没有任务 id")
         return None
     # 一次执行里 origin 不会变；主人改了任务，下一次执行的执行号不同，会重新读。
-    cache_key = f"{job_id}\n{getattr(execution, 'execution_id', '')}"
+    cache_key = _cron_key(job_id, execution)
     cache = _S["cron_origins"]
     if cache_key in cache:
         identity = cache[cache_key]
@@ -305,13 +306,13 @@ def _cron_identity(execution):
     origin = (job or {}).get("origin") or {}
     sender = origin.get("user_id")
     if job is None:
-        _warn_cron(job_id, origin, "任务没了")
+        _warn_cron(job_id, origin, "任务没了，不带身份（核心按归属人封顶）")
         identity = None
     elif origin.get("platform") != "matrix":
-        _warn_cron(job_id, origin, f"建任务的平台是 {origin.get('platform')!r}")
+        _warn_cron(job_id, origin, f"建任务的平台是 {origin.get('platform')!r}，不带身份（核心按归属人封顶）")
         identity = None
     elif not sender:
-        _warn_cron(job_id, origin, "origin 里没有创建者")
+        _warn_cron(job_id, origin, "origin 里没有创建者，不带身份（核心按归属人封顶）")
         identity = None
     else:
         identity = {"sender": sender, "room": origin.get("chat_id"), "thread": origin.get("thread_id")}
@@ -319,6 +320,22 @@ def _cron_identity(execution):
         cache.clear()
     cache[cache_key] = identity
     return dict(identity) if identity else None
+
+
+def _cron_key(job_id, execution):
+    """一次执行一份缓存：换个执行号（主人改过任务）就重新读 origin。"""
+    return f"{job_id}\n{getattr(execution, 'execution_id', '')}"
+
+
+async def _cron_identity_async(execution):
+    """[`_cron_identity`] 的异步版：缓存没命中时把 ``get_job`` 的读盘和解析挪到线程里。
+
+    `get_job` 是同步的，会把整份 ``jobs.json`` 读出来解一遍；在事件循环里直接调用会挡住别的会话。
+    """
+    identity = _S["cron_origins"].get(_cron_key(getattr(execution, "job_id", None), execution), ())
+    if identity != ():
+        return dict(identity) if identity else None
+    return await asyncio.to_thread(_cron_identity, execution)
 
 
 def _refresh_tools():
@@ -592,7 +609,7 @@ def _install_headers():
         turn, source = _identity(env)
         logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
         execution = _cron_execution()
-        cron = _cron_identity(execution) if execution is not None else None
+        cron = await _cron_identity_async(execution) if execution is not None else None
         if cron is not None:
             turn, source = cron, "定时任务"
             _S["last"] = turn
@@ -609,7 +626,12 @@ def _install_headers():
                     logger.warning("这一轮的身份取不到（环境的会话 %r）：调用不带代表头和会话", env)
                 else:
                     logger.warning("这一轮没有会话号，身份取不到：调用不带代表头和会话")
-            return await original(server, *args, **kwargs)
+            # 明确压一个空身份：别让盖章退回去拿上一轮的 last 猜这次调用。
+            token = _CURRENT.set({})
+            try:
+                return await original(server, *args, **kwargs)
+            finally:
+                _CURRENT.reset(token)
         _S["last"] = turn
         _patch_session(server.session)
         token = _CURRENT.set(turn)
@@ -649,14 +671,13 @@ def _wrap_list_tools():
 
 
 def _stamp_turn(session):
-    """让会话在每次请求的头里带上这一轮的身份。
+    """让会话的每次请求都带这一轮的身份。
 
     上游把 resolve_param_headers 在 ``adopt()`` 时就包进 ``_stamp`` 闭包，之后再换 ``_resolve_param_headers``
     不起作用；``_stamp`` 每次请求现调，改它才落到线上。``adopt()`` 会换掉 ``_stamp``，包过以后跟着重包。
 
-    调用（``tools/call``）用 ``_CURRENT``：工具线程里按这次调用 set 的。清单之类没有进行中的调用，用这一轮
-    在 ``_S["last"]`` 上放的身份——``_run_on_mcp_loop`` 拷的是循环线程的 context，``_CURRENT`` 到不了。调用
-    自己没认出身份时不拿 ``last`` 猜。
+    身份按序取：工具线程里这次调用 set 的 ``_CURRENT``；取不到用这一轮在 ``_S["last"]`` 上放的
+    （``_run_on_mcp_loop`` 拷的是循环线程的 context，``_CURRENT`` 进不了清单）。
     """
     stamp = session._stamp
     if getattr(stamp, "_wonton_stamp", False):
@@ -664,9 +685,8 @@ def _stamp_turn(session):
 
     def with_turn(data, opts):
         stamp(data, opts)
-        calling = data.get("method") == "tools/call"
         turn = _CURRENT.get()
-        if turn is None and not calling:
+        if turn is None:
             turn = _S["last"]
         if not turn:
             return

@@ -150,6 +150,12 @@ class Session:
         # 真的 _preconnect_stamp / _make_modern_stamp 每个请求都盖 Mcp-Param-Owner。
         opts.setdefault("headers", {})["Mcp-Param-Owner"] = "1"
 
+    def stamp(self, data, opts=None):
+        # 像真会话一样过 _stamp，再把这次请求的头记下来给断言。
+        opts = {} if opts is None else opts
+        self._stamp(data, opts)
+        self.headers.append(opts.get("headers", {}))
+
     def adopt(self, result):
         self._stamp = lambda data, opts: Session._stamp(self, data, opts)
 
@@ -161,9 +167,7 @@ class Session:
     async def call_tool(self, name, arguments=None, **kwargs):
         self.calls.append((name, arguments, kwargs))
         data = {"method": "tools/call", "params": {"name": name, "arguments": arguments or {}}}
-        opts = {}
-        self._stamp(data, opts)
-        self.headers.append(opts.get("headers", {}))
+        self.stamp(data)
         return "ok"
 
 
@@ -175,9 +179,7 @@ class Server:
 async def _list_tools(session, *, params=None):
     """上游会话的 ``tools/list``：同样要过 ``_stamp``。"""
     data = {"method": "tools/list", "params": params or {}}
-    opts = {}
-    session._stamp(data, opts)
-    session.headers.append(opts.get("headers", {}))
+    session.stamp(data)
     return "listed"
 
 
@@ -342,6 +344,21 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         headers = self.server.session.headers[-1]
         self.assertEqual(headers["X-Wonton-On-Behalf-Of"], OWNER)
         self.assertEqual(headers["wonton-session"], SID)
+
+    async def test_a_call_without_a_current_turn_still_uses_the_last_speaker(self):
+        # 调用一般走 _CURRENT；上游换掉处理器、子代理之类的路径上没 set 过，这时按这一轮算，不比清单少。
+        turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
+        turn.pre_llm_call(session_id=SID, sender_id=OWNER)
+        await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+        self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], OWNER)
+
+    async def test_any_request_carries_the_turn_sender(self):
+        # 不只 tools/call：stamp 每次请求都调，别的方法同样按这一轮盖。
+        turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
+        turn.pre_llm_call(session_id=SID, sender_id=OWNER)
+        turn._patch_session(self.server.session)
+        self.server.session.stamp({"method": "ping"})
+        self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], OWNER)
 
     async def test_a_list_without_any_identity_still_gets_the_owner_param(self):
         await self.server.session.list_tools()
@@ -640,6 +657,39 @@ class CronCase(TurnCase):
         headers = self.server.session.headers[-1]
         self.assertNotIn("X-Wonton-On-Behalf-Of", headers)
         self.assertNotIn("wonton-session", headers)
+
+    async def test_the_job_file_is_read_once_per_execution(self):
+        # get_job 是同步读盘、解析整份 jobs.json；一次执行里十几次调用只该读一次。
+        reads = []
+        original = jobs_module.get_job
+        self.addCleanup(setattr, jobs_module, "get_job", original)
+
+        def counted(job_id):
+            reads.append(job_id)
+            return original(job_id)
+
+        jobs_module.get_job = counted
+        for _ in range(3):
+            await self.cron_call()
+        self.assertEqual(reads, ["job-1"])
+
+    async def test_a_new_execution_reads_the_job_again(self):
+        # 主人改了任务，下一次执行的执行号不同，origin 得重读。
+        reads = []
+        original = jobs_module.get_job
+        self.addCleanup(setattr, jobs_module, "get_job", original)
+
+        def counted(job_id):
+            reads.append(job_id)
+            return original(job_id)
+
+        jobs_module.get_job = counted
+        await self.cron_call()
+        self.ctx.execution = CronExecution()
+        self.ctx.execution.execution_id = "exec-2"
+        EXECUTION.set(self.ctx.execution)
+        await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+        self.assertEqual(reads, ["job-1", "job-1"])
 
     async def test_the_tool_list_carries_the_creator(self):
         # 清单按说话人过滤，连接、重连时取；定时任务下带的是创建者。
