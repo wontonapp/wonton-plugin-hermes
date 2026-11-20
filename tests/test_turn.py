@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 handlers = types.ModuleType("tools.mcp_tool_handlers")
 
-async def _upstream(server, tool_name, args, progress_callback=None):
+async def _upstream(server, server_name, tool_name, args, progress_callback=None):
     return await server.session.call_tool(tool_name, arguments=args, progress_callback=progress_callback)
 
 handlers._call_tool_racing_stdio_death = _upstream
@@ -68,14 +68,14 @@ class Store:
         self.keys = {}
         self.entries = {SID: Entry(), MOM_SID: MomEntry()}
 
-    def _generate_session_key(self, source):
+    def _generate_session_key(self, source, key_source=None):
         return f"key:{source.chat_id}"
 
-    def peek_session_id(self, key):
-        return self.keys.get(key)
+    def peek_session_id(self, session_key):
+        return self.keys.get(session_key)
 
-    def lookup_by_session_id(self, sid):
-        return self.entries.get(sid)
+    def lookup_by_session_id(self, session_id):
+        return self.entries.get(session_id)
 
 
 class Source:
@@ -187,7 +187,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
     async def turn(self):
         turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
         return turn.pre_llm_call(session_id=SID, sender_id=OWNER), await handlers._call_tool_racing_stdio_death(
-            self.server, "wonton__save_file", {"x": 1})
+            self.server, "srv", "wonton__save_file", {"x": 1})
 
     async def test_tool_call_carries_sender_session_and_origin(self):
         self.assertEqual((await self.turn())[1], "ok")
@@ -199,19 +199,22 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(headers["Mcp-Param-Owner"], "1")
         self.assertEqual(kwargs["meta"], {"app.wonton/origin": {"room_id": ROOM}})
 
-    async def test_tool_call_without_turn_has_no_headers(self):
+    async def test_a_call_without_a_known_turn_still_names_the_session(self):
+        # 没报上链也照样带会话号：核心按会话去找那一轮的说话人，比不带强。
         self.server.session._wonton_turn = False
         await handlers._call_tool_racing_stdio_death(
-            self.server, "x", {})
-        self.assertEqual(self.server.session.headers[-1], {"Mcp-Param-Owner": "1"})
-        self.assertNotIn("meta", self.server.session.calls[0][2])
+            self.server, "srv", "x", {})
+        self.assertEqual(
+            self.server.session.headers[-1], {"Mcp-Param-Owner": "1", "wonton-session": SID}
+        )
+        self.assertEqual(self.server.session.calls[0][2]["meta"], {"app.wonton/origin": {}})
 
     async def test_the_identity_comes_from_the_session_not_the_hook_thread(self):
         turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
         self.env.pop("HERMES_SESSION_ID")
         turn.pre_llm_call(session_id=SID, sender_id=OWNER)
         self.env["HERMES_SESSION_ID"] = SID
-        await handlers._call_tool_racing_stdio_death(self.server, "x", {})
+        await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
         self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], OWNER)
 
     async def test_interleaved_turns_each_carry_their_own_identity(self):
@@ -225,7 +228,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
             contextvars.copy_context().run(turn.pre_llm_call, session_id=sid, sender_id=sender)
 
         async def call_in(ctx):
-            task = ctx.run(loop.create_task, handlers._call_tool_racing_stdio_death(self.server, "x", {}))
+            task = ctx.run(loop.create_task, handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {}))
             return await task
 
         turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
@@ -253,23 +256,38 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
             # 妈妈这一轮的 Agent 线程绑的是它自己的会话号，工具线程拷的就是这份。
             self.bind("HERMES_SESSION_ID", MOM_SID)
             turn.pre_llm_call(session_id=MOM_SID, sender_id=MOM)
-            return await handlers._call_tool_racing_stdio_death(self.server, "x", {})
+            return await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
 
         self.assertEqual(await asyncio.create_task(mom_turn()), "ok")
         headers = self.server.session.headers[0]
         self.assertEqual(headers["X-Wonton-On-Behalf-Of"], MOM)
         self.assertEqual(headers["wonton-session"], MOM_SID)
 
-    async def test_without_a_turn_a_lone_open_session_is_not_guessed(self):
-        # 环境里的会话号是别人的一轮占着的、本会话又没记下来源时不猜：宁可不带，也不挂到别人的链上。
+    async def test_without_a_session_the_identity_is_not_guessed_and_warns(self):
+        # 没有会话号时不认“唯一在跑的那条”：宁可不带，也不挂到别人的链上；取不到要如实告警。
         await self.turn()
         self.server.session.calls.clear()
         self.server.session.headers.clear()
         self.env.clear()
-        with self.assertLogs("wonton.turn", level="WARNING") as logs:
-            await handlers._call_tool_racing_stdio_death(self.server, "x", {})
+        with mock.patch.object(turn.logger, "warning") as warned:
+            await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
         self.assertNotIn("X-Wonton-On-Behalf-Of", self.server.session.headers[0])
-        self.assertIn("身份取不到", "\n".join(logs.output))
+        self.assertIn("没有会话号", str(warned.call_args))
+
+    async def test_a_lone_session_keeps_its_headers_while_another_is_active(self):
+        # 工具调用自己的会话号是 B、A 的一轮还开着：B 只带会话号（不给 B 猜一个说话人），A 仍带 A。
+        await self.turn()
+        self.server.session.calls.clear()
+        self.server.session.headers.clear()
+        self.bind("HERMES_SESSION_ID", MOM_SID)
+        await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+        headers = self.server.session.headers[0]
+        self.assertEqual(headers["wonton-session"], MOM_SID)
+        self.assertNotIn("X-Wonton-On-Behalf-Of", headers)
+        self.bind("HERMES_SESSION_ID", SID)
+        await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+        headers = self.server.session.headers[1]
+        self.assertEqual((headers["X-Wonton-On-Behalf-Of"], headers["wonton-session"]), (OWNER, SID))
 
     async def test_end_clears_the_turn(self):
         await self.turn()
@@ -277,7 +295,11 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         turn.on_session_end(session_id=SID)
         self.assertNotIn("key:!dm1:example.org", turn._S["pending"])
         await handlers._call_tool_racing_stdio_death(
-            self.server, "x", {})
+            self.server, "srv", "x", {})
+        self.assertNotIn("X-Wonton-On-Behalf-Of", self.server.session.headers[-1])
+        self.env.clear()
+        await handlers._call_tool_racing_stdio_death(
+            self.server, "srv", "x", {})
         self.assertNotIn("wonton-session", self.server.session.headers[-1])
 
     async def test_end_without_a_start_is_not_reported(self):
@@ -338,14 +360,21 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
             block, _ = await self.turn()
             self.assertEqual(block["message"], text["zh-Hans"])
 
-    async def test_an_unclear_refusal_carries_the_cores_reason(self):
-        # 同样的 invalid_input 也可能是这一轮的会话还挂在别的链上，类别本身说不清。
+    async def test_a_session_on_another_chain_gets_its_own_words(self):
+        # 同样的 invalid_input，会话已经登记在别的链上时核心不带 refusal：给专门的一句，不落到泛泛的“没收下”。
         self.answer = lambda _body: Response(
             {"type": "invalid_input", "refusal": "other"}, 400, "会话 s-1 已登记在别的链上"
         )
         block, _ = await self.turn()
+        self.assertEqual(block["message"], turn.CHAIN_HELD["zh-Hans"])
+
+    async def test_a_permission_denial_carries_the_cores_reason(self):
+        self.answer = lambda _body: Response(
+            {"type": "permission_denied"}, 403, "说话人不是这个 Bot 听的人"
+        )
+        block, _ = await self.turn()
         self.assertEqual(
-            block["message"], turn.CHAIN_OTHER["zh-Hans"] + "\n\n会话 s-1 已登记在别的链上"
+            block["message"], turn.CHAIN_DENIED["zh-Hans"] + "\n\n说话人不是这个 Bot 听的人"
         )
 
     async def test_an_unknown_refusal_type_isnt_called_a_limit(self):
@@ -379,14 +408,14 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start"])
 
     async def test_the_fresh_message_wins_over_the_previous_origin(self):
-        # 被打断、重置后 peek 不到会话 id，pre_gateway_dispatch 只写 pending；下一句仍要报新消息，
+        # 同一条会话还在 origins 里、下一句又记进了 pending：报链要用新消息的 id，
         # 不然核心按旧消息的唤醒标签找到停了的链，整轮被拒。
         await self.turn()
-        turn.on_session_end(session_id=SID)
-        await asyncio.sleep(0.05)
         self.sent.clear()
-        with mock.patch.object(Event, "message_id", "$event-2"):
-            await self.turn()
+        turn.pre_gateway_dispatch(event=Event(), session_store=self.store)
+        turn._S["pending"]["key:!dm1:example.org"]["event_id"] = "$event-2"
+        turn._S["reported"].discard(SID)
+        turn.pre_llm_call(session_id=SID, sender_id=OWNER)
         self.assertEqual(self.sent[0][1]["event_id"], "$event-2")
 
     async def test_a_stopped_chain_is_reported_again_without_the_message(self):
@@ -421,6 +450,16 @@ class OutboxCase(unittest.IsolatedAsyncioTestCase):
             interrupt_reason="云吞停链", invalidation_reason="wonton_chain_stopped")
         runner._interrupt_running_turn.assert_not_called()
         self.assertEqual(self.receipts, [("o-1", {"result": "sent", "event_id": ""})])
+
+    async def test_a_failing_clear_still_frees_the_slot(self):
+        runner = mock.Mock()
+        runner._interrupt_and_clear_session = mock.AsyncMock(side_effect=RuntimeError("boom"))
+        runner._interrupt_running_turn.return_value = 7
+        turn._S["runner"] = runner
+        with mock.patch.object(turn, "_receipt", self._receipt):
+            await turn._do_outbox({"id": "o-3", "kind": {"type": "cancel_turn", "session": SID}})
+        runner._drop_turn_slot.assert_called_once_with("key:!dm1:example.org", run_generation=7)
+        self.assertEqual(self.receipts, [("o-3", {"result": "sent", "event_id": ""})])
 
     async def test_cancel_without_the_source_frees_the_slot_itself(self):
         runner = mock.Mock()
