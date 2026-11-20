@@ -54,6 +54,7 @@ extra_check() {
   hermes_check_dashboard
   agent_check_chat /version
   hermes_check_native_restart
+  hermes_check_core_restart
   agent_check_model
   agent_check_mcp_bus
   agent_check_outsider
@@ -108,6 +109,34 @@ hermes_check_native_restart() {
     extra_item PASS 重启后还能聊 "经 dashboard 原生重启：网关进程号换了、容器没重启，之后加密私聊照样收发"
   else
     extra_item FAIL 重启后还能聊 "原生重启后收不到加密回复：$(agent_tail "$out")"
+  fi
+  printf '%s\n' "$out"
+}
+
+# 核心重启：升级、崩溃、手动重启核心都会这样，Bot 的同步要自己接上。核心在恢复插件、问不到 Tuwunel 期间
+# 要答可重试的 503（答 403 上游就停掉同步，进程还活着、健康还绿，只有重启网关才好），重启完私聊照样通。
+hermes_check_core_restart() {
+  local core gw health out before i
+  agent_need 核心重启后还能聊 || return 0
+  core="wonton-$SMOKE_INSTANCE"
+  gw="$(hermes_gateway)" || { extra_item FAIL 核心重启后还能聊 "找不到 gateway 容器"; return 0; }
+  before="$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')"
+  docker restart "$core" >/dev/null 2>&1 || { extra_item FAIL 核心重启后还能聊 "重启核心容器失败"; return 0; }
+  for ((i = 0; i < 120; i++)); do
+    health="$(docker inspect -f '{{.State.Health.Status}}' "$core" 2>/dev/null)" || health=""
+    [[ "$health" == healthy ]] && break
+    sleep 1
+  done
+  ((i < 120)) || { extra_item FAIL 核心重启后还能聊 "核心 120 秒没回到 healthy"; return 0; }
+  if [[ "$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')" != "$before" ]]; then
+    extra_item FAIL 核心重启后还能聊 "重启核心把网关容器也重启了，这项就测不出适配器自己重连"
+    return 0
+  fi
+  agent_wait_healthy "$gw" || { extra_item FAIL 核心重启后还能聊 "网关没回到 healthy"; return 0; }
+  if out="$(agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
+    extra_item PASS 核心重启后还能聊 "重启核心：网关容器没动，同步自己接上，加密私聊照样收发"
+  else
+    extra_item FAIL 核心重启后还能聊 "重启核心后收不到加密回复：$(agent_tail "$out")"
   fi
   printf '%s\n' "$out"
 }
