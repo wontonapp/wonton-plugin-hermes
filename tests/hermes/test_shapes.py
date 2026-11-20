@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import contextvars
 import importlib
 import inspect
 import sys
@@ -16,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))
 
 
 # 其他测试用同名假模块顶掉这些上游包；真模块导进来前要连根摘掉，导完放回去。
-FAKE_ROOTS = ("mautrix", "tools", "gateway", "hermes_cli", "mcp")
+FAKE_ROOTS = ("mautrix", "tools", "gateway", "hermes_cli", "mcp", "agent", "cron")
 
 
 def _real(name):
@@ -80,17 +81,39 @@ class ShapeCase(unittest.TestCase):
         self.assertFalse(hasattr(result, "members"))
 
     def test_the_mcp_session_double_matches_the_real_session(self):
-        from tests.test_turn import Session
+        from tests.test_turn import Session, _list_tools
 
-        real = _real("mcp.client.session").ClientSession
-        self.assertEqual(
-            _params(Session._resolve_param_headers), _params(real._resolve_param_headers)
-        )
+        module = _real("mcp.client.session")
+        # 真会话的 _stamp 是实例属性：预连接时是 _preconnect_stamp，握手后换成 _make_modern_stamp。
+        # 两种都只收（data, opts），替身按同样的收。
+        self.assertEqual(_params(Session._stamp)[1:], _params(module._preconnect_stamp))
+        modern = module._make_modern_stamp("2026-01-01", {}, {}, lambda *args: {})
+        self.assertEqual(_params(Session._stamp)[1:], _params(modern))
+        self.assertEqual(_params(Session.adopt), _params(module.ClientSession.adopt))
+        real = module.ClientSession
         # 替身的 call_tool 要把核心的 meta 和 progress_callback 都收下转给上游。
         real_params = inspect.signature(real.call_tool).parameters
         self.assertIn("meta", real_params)
         self.assertIn("progress_callback", real_params)
         self.assertIn("arguments", real_params)
+        # list_tools 替身也要和真的一样只收只限字参数的 params（清单过 _stamp，params 得有）。
+        self.assertEqual(_params(_list_tools)[1:], _params(real.list_tools)[1:])
+
+    def test_the_cron_internals_match_upstream(self):
+        from tests.test_turn import CronExecution
+
+        jobs = _real("cron.jobs")
+        self.assertEqual(_params(jobs.get_job), ["job_id"])
+        identity = _real("cron.execution_identity")
+        self.assertIsInstance(identity._CURRENT, contextvars.ContextVar)
+        for name in ("job_id", "execution_id"):
+            self.assertIn(name, identity.CronExecution.__dataclass_fields__)
+        self.assertTrue(all(hasattr(CronExecution, name) for name in ("job_id", "execution_id")))
+        context = _real("hermes_cli.plugins").PluginContext
+        # 这个镜像里是方法；上游换成 property 也照过，只要取得到、没有额外参数。
+        member = inspect.getattr_static(context, "current_cron_execution")
+        self.assertEqual(_params(member.fget if isinstance(member, property) else member), ["self"])
+
 
     def test_the_tool_handler_double_matches_the_real_handler(self):
         from tests.test_turn import _upstream

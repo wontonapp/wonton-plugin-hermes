@@ -17,15 +17,26 @@ MCP 的工具线程拷着那份 context 跑，所以拿到的是这一轮自己�
 都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 和 ``_S["origins"]`` 两张表，不靠“最近一轮”的进程级值。
 只有会话号时带 ``wonton-session``、不带代表头，让核心按会话去认；连会话号也取不到才不带身份。
 
+定时任务跑的时候没有人当场说话，会话环境里也只有 Hermes 自己生成的 cron 会话号，``_identity`` 查不到；
+这时按插件上下文的 ``current_cron_execution()`` 认出手上的任务，读它的 origin 当说话人（见 ``_cron_identity``）。
+委派出去的子代理里上游让它返回 None，改读上游自己的执行标记，子代理同样替创建者说话。
+定时任务是上游从 cron 直接进 Agent 的，没有网关消息，所以工具处理器也在 ``pre_llm_call`` 里包。
+
+``tools/list`` 也盖这组头：核心按说话人封顶广告出去的清单，连接、重连时取的清单会挂着连接那一刻的帽子，
+所以每轮模型调用前按这一轮的说话人重取一遍，再把新工具交给这一轮。
+
 上游没有插件能挂的“每次工具调用”钩子，只能包它内部的处理器调用；升级 Hermes 时先复查
-``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` 和 ``mcp.client.session.ClientSession.call_tool``。
+``tools.mcp_tool_handlers._call_tool_racing_stdio_death``、``mcp.client.session.ClientSession.call_tool`` /
+``list_tools``、``tools.mcp_tool._servers`` 和 ``tools.mcp_tool_agent.refresh_agent_mcp_tools``。
 """
 
 import asyncio
 import concurrent.futures
+import contextlib
 import contextvars
 import logging
 import os
+import sys
 import threading
 from urllib.parse import urlsplit
 
@@ -43,6 +54,8 @@ ORIGIN = "app.wonton/origin"
 
 # 报链开始的超时：pre_llm_call 钩子要在这里面拿到准信，才决定这一轮做不做。
 START_TIMEOUT = 5.0
+# 重取工具清单的超时：也在 pre_llm_call 里，等它把清单交上来，模型才有工具可用。
+REFRESH_TIMEOUT = 10.0
 # 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用：仍然是个 contextvar，但在
 # 每次调用自己的任务里 set，值跟着任务走，不看进程里最近是哪一轮。
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
@@ -53,18 +66,27 @@ _S = {
     "loop": None,
     "runner": None,
     "session_store": None,
+    "gateway": None,   # 网关：pre_llm_call 的钩子线程上按会话号从它的 agent 缓存找这一轮
+    "ctx": None,     # 插件上下文：定时任务执行中从它拿这条执行
     "origins": {},   # 会话 id -> {sender, session_key, room, thread, event_id}
     "pending": {},   # 会话键 -> 同上，会话 id 这时还没有
     "active": {},    # 会话 id -> 准了的这一轮的 {sender, session, room, thread}
     "reported": set(),  # 这一轮已经报过链开始的会话 id
     "ending": set(),    # 结束时要报 End 的会话 id（准了和被拒的都要报）
     "unknown": set(),   # 已经提醒过“身份取不到”的会话环境值；空串在每轮结束时重新提醒
+    "cron_origins": {}, # 任务 id -> 身份或 None：一次执行里 origin 不变，读到过就记住
+    "cron_warned": {},  # 任务 id -> 提醒过的那份 origin，同一份只提醒一次
+    "last": None,       # 这一轮的身份：清单没有进行中的调用，给它用
+    "listed": None,     # 清单当前是按谁的封顶取的
+    "warned_list": False,
+    "warned_marker": False,
     "worker": None,
     "warned": False,
 }
 
 
 def register(ctx):
+    _S["ctx"] = ctx
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", pre_llm_call)
     ctx.register_hook("on_session_end", on_session_end)
@@ -126,6 +148,8 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
     _install_headers()
     if session_store is not None:
         _S["session_store"] = session_store
+    if gateway is not None:
+        _S["gateway"] = gateway
     source = getattr(event, "source", None)
     room = getattr(source, "chat_id", None)
     if room is None or not _is_matrix(getattr(source, "platform", None)):
@@ -219,10 +243,212 @@ def _identity(session_id):
     return None, "无"
 
 
+def _cron_execution():
+    """手上的定时任务执行，没有时 None。
+
+    先问插件上下文；委派出去的子代理里上游特意让它返回 None（``cron/execution_identity.py``），
+    这时退回读上游自己那份执行标记：子代理跑在委派时拷来的 context 里，标记还在，它替同一件事干活。
+    """
+    ctx = _S["ctx"]
+    execution = ctx.current_cron_execution() if ctx is not None else None
+    if execution is not None:
+        return execution
+    try:
+        from cron.execution_identity import _CURRENT
+
+        return _CURRENT.get()
+    except Exception as exc:
+        if not _S["warned_marker"]:
+            _S["warned_marker"] = True
+            logger.warning("拿不到上游的定时任务执行标记，子代理那条身份会失去：%r", exc)
+        return None
+
+
+def _warn_cron(job_id, origin, reason):
+    """同一个任务的同一份 origin 只提醒一次：主人改了任务的 origin 会再提醒一次。"""
+    key = repr(origin)
+    if _S["cron_warned"].get(job_id) == key:
+        return
+    if len(_S["cron_warned"]) > 256:
+        _S["cron_warned"].clear()
+    _S["cron_warned"][job_id] = key
+    logger.warning("定时任务 %s 的 origin 用不上（%s），调用不带身份", job_id, reason)
+
+
+def _cron_identity(execution):
+    """定时任务（含它委派出去的子代理）调工具时替这条任务的创建者说话。没有定时任务时 None。
+
+    定时任务跑的时候没有人当场说话，`_identity` 查不到；任务的 ``origin`` 记着建任务那一轮的会话环境
+    （上游 ``tools/cronjob_job_args._origin_from_env``），``origin`` 是建任务时从会话环境抄的字符串，
+    A 让 Bot 建的任务就按 A 算，模型在工具子进程里改不了它。
+
+    头是插件自报的，核心只核对“这个 Bot 听不听这个人”（和聊天轮一样）：创建者后来不听这个 Bot 了，核心按
+    认不出算、只读。平台不是正好 ``matrix``、没有创建者、任务没了都不带身份，那几样主人从日志里看不出，所以
+    各提醒一次；没有身份核心按只读算（核心 #832 起），不按 Bot 的归属人，也不再按共享 Bot 的能用人算。
+
+    定时任务没有进行中的轮次，子代理也不是一轮，所以只带代表头，不带 ``wonton-session``。
+    """
+    job_id = getattr(execution, "job_id", None)
+    if not job_id:
+        _warn_cron("", None, "执行里没有任务 id")
+        return None
+    # 一次执行里 origin 不会变；主人改了任务，下一次执行的执行号不同，会重新读。
+    cache_key = _cron_key(job_id, execution)
+    cache = _S["cron_origins"]
+    if cache_key in cache:
+        identity = cache[cache_key]
+        return dict(identity) if identity else None
+    try:
+        from cron.jobs import get_job
+
+        job = get_job(job_id)
+    except Exception as exc:
+        # 读盘失败可能是暂时的，不记住，下一次调用再试。
+        _warn_cron(job_id, None, f"读任务失败 {exc!r}")
+        return None
+    origin = (job or {}).get("origin") or {}
+    sender = origin.get("user_id")
+    if job is None:
+        _warn_cron(job_id, origin, "任务没了，不带身份（核心按只读算）")
+        identity = None
+    elif origin.get("platform") != "matrix":
+        _warn_cron(job_id, origin, f"建任务的平台是 {origin.get('platform')!r}，不带身份（核心按只读算）")
+        identity = None
+    elif not sender:
+        _warn_cron(job_id, origin, "origin 里没有创建者，不带身份（核心按只读算）")
+        identity = None
+    else:
+        identity = {"sender": sender, "room": origin.get("chat_id"), "thread": origin.get("thread_id")}
+    if len(cache) > 64:
+        cache.clear()
+    cache[cache_key] = identity
+    return dict(identity) if identity else None
+
+
+def _cron_key(job_id, execution):
+    """一次执行一份缓存：换个执行号（主人改过任务）就重新读 origin。"""
+    return f"{job_id}\n{getattr(execution, 'execution_id', '')}"
+
+
+async def _cron_identity_async(execution):
+    """[`_cron_identity`] 的异步版：缓存没命中时把 ``get_job`` 的读盘和解析挪到线程里。
+
+    `get_job` 是同步的，会把整份 ``jobs.json`` 读出来解一遍；在事件循环里直接调用会挡住别的会话。
+    """
+    identity = _S["cron_origins"].get(_cron_key(getattr(execution, "job_id", None), execution), ())
+    if identity != ():
+        return dict(identity) if identity else None
+    return await asyncio.to_thread(_cron_identity, execution)
+
+
+def _refresh_tools():
+    """在 MCP 循环上把每个在线服务的清单按当前身份重取一遍。
+
+    服务端那侧的 ``tools/list`` 拿的是 ``_S["last"]``：``_run_on_mcp_loop`` 拷的是循环线程的 context，工具
+    线程里 set 的 ``_CURRENT`` 到不了。只连着读，不重连（不是 ``reprobe_tool_availability``）。全都失败时抛错，
+    一个都没连上时返回 False——那样不记说话人，下一轮再来，连接自己的第一次清单会带这一轮的帽子。
+    """
+    from tools.mcp_tool import _servers
+    from tools.mcp_tool_loop import _run_on_mcp_loop
+
+    tasks = [task for task in _servers.values() if task.session is not None]
+    if not tasks:
+        return False
+    errors = []
+    for server_task in tasks:
+        try:
+            _run_on_mcp_loop(lambda task=server_task: task._refresh_tools(), timeout=REFRESH_TIMEOUT)
+        except Exception as exc:
+            errors.append(exc)
+    if len(errors) == len(tasks):
+        raise errors[0]
+    for error in errors:
+        logger.warning("有一个 MCP 服务的清单没重取上：%r", error)
+    return True
+
+
+def _refresh_agent_tools(agent):
+    """把注册表里现在的工具重新交给这一轮。
+
+    ``preserve_prefix`` 只往后面加、不动模型已经见过的顺序；这样重取到的写工具这一轮就能用，不用等下一轮。
+    """
+    from tools.mcp_tool_agent import refresh_agent_mcp_tools
+
+    return refresh_agent_mcp_tools(agent, quiet_mode=True, preserve_prefix=True)
+
+
+def _agent_for_turn(session_id):
+    """这一轮正在跑的 Agent；工具清单挂在它身上。
+
+    ``pre_llm_call`` 没有这个参数，上面几层调用方有（``_collect_pre_llm_call_context(agent, …)``）。上游把
+    ``pre_llm_call`` 扔在 ``hermes-hook-*`` 线程上跑（``plugins_dispatch`` 的 bounded 集合），调用点的栈帧到不了
+    钩子线程，所以先按栈找（同线程的调用点），再按会话号去网关的 agent 缓存里找。只认会话号对得上的那一个，
+    找不到就 None，新清单从下一轮起生效。
+    """
+    frame = sys._getframe(1)
+    while frame is not None:
+        agent = frame.f_locals.get("agent")
+        if agent is not None and getattr(agent, "session_id", None) == session_id:
+            return agent
+        frame = frame.f_back
+    cache = getattr(_S["gateway"], "_agent_cache", None)
+    if not cache:
+        return None
+    lock = getattr(_S["gateway"], "_agent_cache_lock", None)
+    with (lock or contextlib.suppress()):
+        for entry in list(cache.values()):
+            agent = entry[0] if isinstance(entry, tuple) else entry
+            if getattr(agent, "session_id", None) == session_id:
+                return agent
+    return None
+
+
+def _remember_for_listing(session_id, sender):
+    """按这一轮的说话人重取工具清单，并把身份留给 ``tools/list``。
+
+    核心按代表头过滤广告出去的清单：共享 Bot 的清单按能用人里最低的那位封顶，写工具会被整片摘掉，而这份
+    清单只在连接、重连时取一次，挂着不动的连接会一直用连接那一刻的帽子。模型调用之前按这一轮的身份重取
+    一遍，模型这一轮才看得见他买得起的工具。同一个说话人不重取。
+    """
+    execution = _cron_execution()
+    if execution is not None:
+        identity = _cron_identity(execution)
+    elif sender:
+        identity = {"sender": sender, "session": session_id, "room": None, "thread": None}
+    else:
+        identity = None
+    _S["last"] = identity
+    if identity is None or identity["sender"] == _S["listed"]:
+        return
+    try:
+        refreshed = _refresh_tools()
+    except Exception as exc:
+        logger.warning("按 %s 重取工具清单失败，这一轮按旧清单走：%r", identity["sender"], exc)
+        return
+    if not refreshed:
+        return
+    if _S["last"] is not identity:
+        return  # 重取期间这一轮已经换人或没了，别把旧身份记成已取
+    _S["listed"] = identity["sender"]
+    agent = _agent_for_turn(session_id)
+    if agent is None:
+        return
+    try:
+        added = _refresh_agent_tools(agent)
+    except Exception as exc:
+        logger.warning("把重取到的清单交给这一轮失败：%r", exc)
+        return
+    if added:
+        logger.warning("按 %s 重取后清单多了：%s", identity["sender"], ", ".join(sorted(added)))
+
+
 def pre_llm_call(session_id="", sender_id="", **_):
     """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
+    # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
+    _install_headers()
     origin = _origin(session_id) or {}
     sender = sender_id or origin.get("sender")
+    _remember_for_listing(session_id, sender)
     if not sender or not origin.get("room") or session_id in _S["reported"]:
         return None
     body = {
@@ -372,10 +598,11 @@ def _chain_request(url, body, bot):
 
 
 def _install_headers():
-    """给 MCP 会话的每次 ``tools/call`` 带上这一轮的身份头和来源。
+    """给 MCP 会话的每次请求带上这一轮的身份头和来源；清单（``tools/list``）另外先包上会话。
 
     插件注册时 Hermes 还没导 ``tools.mcp_tool_handlers``，第一条消息到时再包；包过以后这里是空的。
     """
+    _wrap_list_tools()
     try:
         from tools import mcp_tool_handlers
     except Exception as exc:
@@ -395,14 +622,31 @@ def _install_headers():
         env = _session_id()
         turn, source = _identity(env)
         logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
+        execution = _cron_execution()
+        cron = await _cron_identity_async(execution) if execution is not None else None
+        if cron is not None:
+            turn, source = cron, "定时任务"
+            _S["last"] = turn
+            logger.debug("MCP 调用来自定时任务：替创建者 %s 说话，不带会话", turn["sender"])
+        elif execution is not None and turn is not None:
+            # 定时任务的会话号核心认不出，别拿它去猜别的轮。
+            turn = {**turn, "session": None}
         if turn is None:
+            if source != "轮次":
+                logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
             if env not in _S["unknown"]:
                 _S["unknown"].add(env)
                 if env:
                     logger.warning("这一轮的身份取不到（环境的会话 %r）：调用不带代表头和会话", env)
                 else:
                     logger.warning("这一轮没有会话号，身份取不到：调用不带代表头和会话")
-            return await original(server, *args, **kwargs)
+            # 明确压一个空身份：别让盖章退回去拿上一轮的 last 猜这次调用。
+            token = _CURRENT.set({})
+            try:
+                return await original(server, *args, **kwargs)
+            finally:
+                _CURRENT.reset(token)
+        _S["last"] = turn
         _patch_session(server.session)
         token = _CURRENT.set(turn)
         try:
@@ -414,22 +658,74 @@ def _install_headers():
     mcp_tool_handlers._call_tool_racing_stdio_death = call
 
 
+def _wrap_list_tools():
+    """清单也带身份：会话一建好、还没有任何调用时就把它包上。
+
+    清单是连接、重连时取的，那时没有进行中的调用，身份用这一轮在 ``_S["last"]`` 上放的那份。包在
+    ``list_tools`` 外面，请求进来先包会话（``_stamp`` 在第一个 await 之前同步跑完，补进 ``opts`` 的头一定在
+    发出去的请求里）。
+    """
+    try:
+        from mcp.client.session import ClientSession
+    except Exception as exc:
+        if not _S["warned_list"]:
+            _S["warned_list"] = True
+            logger.warning("上游没有会话的 ``list_tools`` 可包，清单不会带身份：%r", exc)
+        return
+    if getattr(ClientSession.list_tools, "_wonton_list", False):
+        return
+    original = ClientSession.list_tools
+
+    async def list_tools(self, *args, **kwargs):
+        _patch_session(self)
+        return await original(self, *args, **kwargs)
+
+    list_tools._wonton_list = True
+    ClientSession.list_tools = list_tools
+
+
+def _stamp_turn(session):
+    """让会话的每次请求都带这一轮的身份。
+
+    上游把 resolve_param_headers 在 ``adopt()`` 时就包进 ``_stamp`` 闭包，之后再换 ``_resolve_param_headers``
+    不起作用；``_stamp`` 每次请求现调，改它才落到线上。``adopt()`` 会换掉 ``_stamp``，包过以后跟着重包。
+
+    身份按序取：工具线程里这次调用 set 的 ``_CURRENT``；取不到用这一轮在 ``_S["last"]`` 上放的
+    （``_run_on_mcp_loop`` 拷的是循环线程的 context，``_CURRENT`` 进不了清单）。
+    """
+    stamp = session._stamp
+    if getattr(stamp, "_wonton_stamp", False):
+        return
+
+    def with_turn(data, opts):
+        stamp(data, opts)
+        turn = _CURRENT.get()
+        if turn is None:
+            turn = _S["last"]
+        if not turn:
+            return
+        headers = opts.setdefault("headers", {})
+        if turn.get("sender"):
+            headers[ON_BEHALF_OF] = turn["sender"]
+        if turn.get("session"):
+            headers[SESSION] = turn["session"]
+
+    with_turn._wonton_stamp = True
+    session._stamp = with_turn
+
+
 def _patch_session(session):
     if getattr(session, "_wonton_turn", False):
         return
     session._wonton_turn = True
-    original_headers = session._resolve_param_headers
+    _stamp_turn(session)
+    original_adopt = session.adopt
 
-    def resolve(name, arguments):
-        headers = dict(original_headers(name, arguments) or {})
-        turn = _CURRENT.get()
-        if turn:
-            if turn.get("sender"):
-                headers[ON_BEHALF_OF] = turn["sender"]
-            headers[SESSION] = turn["session"]
-        return headers
+    def adopt(result):
+        original_adopt(result)
+        _stamp_turn(session)
 
-    session._resolve_param_headers = resolve
+    session.adopt = adopt
     original_call = session.call_tool
 
     async def call_tool(name, arguments=None, *args, **kwargs):
