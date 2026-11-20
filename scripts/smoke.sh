@@ -286,8 +286,11 @@ if [[ "$DATA_NA" != 1 ]] && (( DATA_HOOKS )) && [[ -n "$upgrade_from" ]]; then
 fi
 
 # 装过升级起点时，核心不接受 install 覆盖已装的插件（同一版本号也一样）：升级用 reinstall，保留数据。
+# 核心镜像预装的 Hermes 同理：不卸掉它（工具 Bot 还要用它的账号），直接 reinstall 换成工作区的版本。
 install_cmd=install
-((data_upgrade_base == 1)) && install_cmd=reinstall
+if ((data_upgrade_base == 1)) || probes_status_wait "$PROBES_PLUGIN_ID" 5 >/dev/null; then
+  install_cmd=reinstall
+fi
 if ! probes_dev "$install_cmd" --yes "${setting_args[@]}" >>"$LOG" 2>&1; then
   fail 装得上 "dev.sh $install_cmd --yes 失败，看 $LOG"
   for item in 网页打得开 用户身份能用 工具Bot调得到; do fail "$item" "装不上"; done
