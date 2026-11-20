@@ -126,7 +126,7 @@ hermes_check_native_restart() {
 hermes_check_core_restart() {
   local core gw health out file before i
   agent_need 核心重启后还能聊 || return 0
-  core="wonton-$SMOKE_INSTANCE"
+  core="wonton-$SMOKE_INSTANCE--core"
   gw="$(hermes_gateway)" || { extra_item FAIL 核心重启后还能聊 "找不到 gateway 容器"; return 0; }
   before="$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')"
   docker restart "$core" >/dev/null 2>&1 || { extra_item FAIL 核心重启后还能聊 "重启核心容器失败"; return 0; }
@@ -167,7 +167,7 @@ hermes_check_core_restart() {
 # 消息就被叫醒（插件挂 pre_gateway_dispatch）。
 hermes_check_tuwunel_outage() {
   local core gw tuwunel before t0 restarts now logs park_line sync_line
-  local health revived_at sent_at file audit_from reply="-" delta when i
+  local health revived_at sent_at file audit_from reply="-" delta when i out
   agent_need "Tuwunel 掉线" || return 0
   core="wonton-$SMOKE_INSTANCE--core"
   gw="$(hermes_gateway)" || { extra_item FAIL "Tuwunel 掉线" "找不到 gateway 容器"; return 0; }
@@ -234,6 +234,12 @@ hermes_check_tuwunel_outage() {
   fi
   # 手机要等核心不再重启再建：核心每重启一次就换一个网络命名空间，早建了也接不上。
   agent_phone_rejoin || extra_item FAIL "Tuwunel 回来后" "手机接不回核心的网络：$AGENT_WHY"
+  if out="$(agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
+    extra_item PASS 掉线后还能聊 "Tuwunel 回来后加密私聊照样收发"
+  else
+    extra_item FAIL 掉线后还能聊 "Tuwunel 回来后收不到加密回复：$(agent_tail "$out")"
+  fi
+  printf '%s\n' "$out"
   agent_need "掉线后工具能调" model || return 0
   file="$(agent_tmp)"
   audit_from=0
