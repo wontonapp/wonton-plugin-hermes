@@ -5,6 +5,7 @@ import contextlib
 import contextvars
 import json
 import sys
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -724,6 +725,23 @@ class CronCase(TurnCase):
         self.assertEqual(len(pending_refreshes), 1)
         self.assertEqual(pending_refreshes, ["refreshed"])
         self.assertEqual(len(self.server_task._refresh_tools.mock_calls), 1)
+        self.assertEqual(refreshed_agents, [(agent, {"quiet_mode": True, "preserve_prefix": True})])
+
+    async def test_the_new_tools_reach_the_turn_from_the_hook_thread(self):
+        # 上游把 pre_llm_call 扔在 hermes-hook-* 线程上跑（plugins_dispatch 的 bounded 集合裹了线程），
+        # 调用点的 agent 不在栈上：从网关的 agent 缓存按会话号找，重取的清单一样要交到这一轮。
+        self.ctx.execution = CronExecution()
+        EXECUTION.set(self.ctx.execution)
+        turn.register(self.ctx)
+        agent = mock.Mock(session_id="cron_job-1_20261120_090000")
+        gateway = mock.Mock()
+        gateway._agent_cache = {"k": (agent, None)}
+        gateway._agent_cache_lock = threading.Lock()
+        turn.pre_gateway_dispatch(gateway=gateway)
+        thread = threading.Thread(
+            target=turn.pre_llm_call, kwargs={"session_id": "cron_job-1_20261120_090000"})
+        thread.start()
+        thread.join()
         self.assertEqual(refreshed_agents, [(agent, {"quiet_mode": True, "preserve_prefix": True})])
 
     async def test_the_same_speaker_does_not_relists(self):

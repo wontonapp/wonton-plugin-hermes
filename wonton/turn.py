@@ -32,6 +32,7 @@ MCP 的工具线程拷着那份 context 跑，所以拿到的是这一轮自己�
 
 import asyncio
 import concurrent.futures
+import contextlib
 import contextvars
 import logging
 import os
@@ -65,6 +66,7 @@ _S = {
     "loop": None,
     "runner": None,
     "session_store": None,
+    "gateway": None,   # 网关：pre_llm_call 的钩子线程上按会话号从它的 agent 缓存找这一轮
     "ctx": None,     # 插件上下文：定时任务执行中从它拿这条执行
     "origins": {},   # 会话 id -> {sender, session_key, room, thread, event_id}
     "pending": {},   # 会话键 -> 同上，会话 id 这时还没有
@@ -146,6 +148,8 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
     _install_headers()
     if session_store is not None:
         _S["session_store"] = session_store
+    if gateway is not None:
+        _S["gateway"] = gateway
     source = getattr(event, "source", None)
     room = getattr(source, "chat_id", None)
     if room is None or not _is_matrix(getattr(source, "platform", None)):
@@ -280,8 +284,7 @@ def _cron_identity(execution):
 
     头是插件自报的，核心只核对“这个 Bot 听不听这个人”（和聊天轮一样）：创建者后来不听这个 Bot 了，核心按
     认不出算、只读。平台不是正好 ``matrix``、没有创建者、任务没了都不带身份，那几样主人从日志里看不出，所以
-    各提醒一次；没有身份不等于只读，核心按 Bot 的归属人封顶（共享 Bot 按能用它的人里最低的那级），主人自己
-    的私有 Bot 照常是主人级。
+    各提醒一次；没有身份核心按只读算（核心 #832 起），不按 Bot 的归属人，也不再按共享 Bot 的能用人算。
 
     定时任务没有进行中的轮次，子代理也不是一轮，所以只带代表头，不带 ``wonton-session``。
     """
@@ -306,13 +309,13 @@ def _cron_identity(execution):
     origin = (job or {}).get("origin") or {}
     sender = origin.get("user_id")
     if job is None:
-        _warn_cron(job_id, origin, "任务没了，不带身份（核心按归属人封顶）")
+        _warn_cron(job_id, origin, "任务没了，不带身份（核心按只读算）")
         identity = None
     elif origin.get("platform") != "matrix":
-        _warn_cron(job_id, origin, f"建任务的平台是 {origin.get('platform')!r}，不带身份（核心按归属人封顶）")
+        _warn_cron(job_id, origin, f"建任务的平台是 {origin.get('platform')!r}，不带身份（核心按只读算）")
         identity = None
     elif not sender:
-        _warn_cron(job_id, origin, "origin 里没有创建者，不带身份（核心按归属人封顶）")
+        _warn_cron(job_id, origin, "origin 里没有创建者，不带身份（核心按只读算）")
         identity = None
     else:
         identity = {"sender": sender, "room": origin.get("chat_id"), "thread": origin.get("thread_id")}
@@ -377,8 +380,10 @@ def _refresh_agent_tools(agent):
 def _agent_for_turn(session_id):
     """这一轮正在跑的 Agent；工具清单挂在它身上。
 
-    ``pre_llm_call`` 没有这个参数，上面几层调用方有（``_collect_pre_llm_call_context(agent, …)``）；只认会话号
-    对得上的那一个，找不到就 None，新清单从下一轮起生效。
+    ``pre_llm_call`` 没有这个参数，上面几层调用方有（``_collect_pre_llm_call_context(agent, …)``）。上游把
+    ``pre_llm_call`` 扔在 ``hermes-hook-*`` 线程上跑（``plugins_dispatch`` 的 bounded 集合），调用点的栈帧到不了
+    钩子线程，所以先按栈找（同线程的调用点），再按会话号去网关的 agent 缓存里找。只认会话号对得上的那一个，
+    找不到就 None，新清单从下一轮起生效。
     """
     frame = sys._getframe(1)
     while frame is not None:
@@ -386,6 +391,15 @@ def _agent_for_turn(session_id):
         if agent is not None and getattr(agent, "session_id", None) == session_id:
             return agent
         frame = frame.f_back
+    cache = getattr(_S["gateway"], "_agent_cache", None)
+    if not cache:
+        return None
+    lock = getattr(_S["gateway"], "_agent_cache_lock", None)
+    with (lock or contextlib.suppress()):
+        for entry in list(cache.values()):
+            agent = entry[0] if isinstance(entry, tuple) else entry
+            if getattr(agent, "session_id", None) == session_id:
+                return agent
     return None
 
 
@@ -425,7 +439,7 @@ def _remember_for_listing(session_id, sender):
         logger.warning("把重取到的清单交给这一轮失败：%r", exc)
         return
     if added:
-        logger.warning("按 %s 重取后清单多了：%s", identity["sender"], ", ".join(added))
+        logger.warning("按 %s 重取后清单多了：%s", identity["sender"], ", ".join(sorted(added)))
 
 
 def pre_llm_call(session_id="", sender_id="", **_):
