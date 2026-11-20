@@ -55,12 +55,19 @@ extra_check() {
   agent_check_chat /version
   hermes_check_native_restart
   hermes_check_core_restart
+  hermes_check_tuwunel_outage
   agent_check_model
   agent_check_mcp_bus
   agent_check_outsider
 }
 
 hermes_gateway() { running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--gateway"; }
+
+# Tuwunel 是核心 compose 里的服务，容器名由 compose 生成，按服务标签找。
+hermes_tuwunel() {
+  docker ps -q --filter "label=com.docker.compose.project=wonton-$SMOKE_INSTANCE" \
+    --filter "label=com.docker.compose.service=tuwunel" | head -1
+}
 
 # 原生控制台：看得到在跑的网关进程，Channels 列得出七个平台。
 hermes_check_dashboard() {
@@ -134,6 +141,7 @@ hermes_check_core_restart() {
     return 0
   fi
   agent_wait_healthy "$gw" || { extra_item FAIL 核心重启后还能聊 "网关没回到 healthy"; return 0; }
+  agent_phone_rejoin || { extra_item FAIL 核心重启后还能聊 "核心重启后手机接不回核心的网络：$AGENT_WHY"; return 0; }
   if out="$(agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
     extra_item PASS 核心重启后还能聊 "重启核心：网关容器没动，同步自己接上，加密私聊照样收发"
   else
@@ -149,6 +157,118 @@ hermes_check_core_restart() {
     extra_item PASS 核心重启后还能调工具 "重启核心后 Bot 经总线调 wonton__list_plugins 成功，回答里有预装的模型网关"
   else
     extra_item FAIL 核心重启后还能调工具 "重启核心后 Bot 调不成 wonton 工具：$(agent_tail "$(cat "$file")")"
+  fi
+  rm -f "$file"
+}
+
+# Tuwunel 停着时核心每次启动都失败、被 restart 策略反复拉起：Bot 的 Matrix 同步和 MCP 都得自己接上，不能靠重启网关。
+# 修之前核心对恢复期的 Bot 请求答 403（地址只给插件网络里的 Bot 用）：同步按永久错误停掉，MCP 服务器被 park，
+# Tuwunel 回来以后也永远不回；修之后答可重试的 503 + Retry-After，同步退避重试，MCP 按可重连处理，主人一发
+# 消息就被叫醒（插件挂 pre_gateway_dispatch）。
+hermes_check_tuwunel_outage() {
+  local core gw tuwunel before t0 restarts now logs park_line sync_line
+  local health revived_at sent_at file audit_from reply="-" delta when i
+  agent_need "Tuwunel 掉线" || return 0
+  core="wonton-$SMOKE_INSTANCE--core"
+  gw="$(hermes_gateway)" || { extra_item FAIL "Tuwunel 掉线" "找不到 gateway 容器"; return 0; }
+  tuwunel="$(hermes_tuwunel)"
+  docker inspect "$tuwunel" >/dev/null 2>&1 ||
+    { extra_item FAIL "Tuwunel 掉线" "找不到 Tuwunel 容器（$tuwunel）"; return 0; }
+  before="$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')"
+  t0="$(date --iso-8601=seconds)"
+  docker stop "$tuwunel" >/dev/null ||
+    { extra_item FAIL "Tuwunel 掉线" "docker stop $tuwunel 失败"; return 0; }
+  restarts="$(docker inspect -f '{{.RestartCount}}' "$core")"
+  docker restart "$core" >/dev/null 2>&1 || docker start "$core" >/dev/null 2>&1
+  for ((i = 0; i < 48; i++)); do
+    sleep 5
+    now="$(docker inspect -f '{{.RestartCount}}' "$core" 2>/dev/null)" || now="$restarts"
+    ((now >= restarts + 2)) && break
+  done
+  if ((now >= restarts + 2)); then
+    extra_item PASS "Tuwunel 掉线" "Tuwunel 停着时核心启动失败、被自己的 restart 策略反复拉起（RestartCount $restarts → $now）"
+  else
+    extra_item FAIL "Tuwunel 掉线" "Tuwunel 停着时核心没有崩溃重启：RestartCount 停在 $now"
+  fi
+  logs="$(docker logs -t --since "$t0" "$gw" 2>&1)"
+  park_line="$(grep -m1 "MCP server 'wonton'.*parking" <<<"$logs" | sed 's/^[^ ]* //')"
+  sync_line="$(grep -m1 -E 'Matrix: (permanent auth error|sync error)' <<<"$logs" | sed 's/^[^ ]* //; s/.*Matrix: /Matrix: /')"
+  if [[ -n "$sync_line" ]]; then
+    if grep -q 'permanent auth error' <<<"$sync_line"; then
+      extra_item PASS "掉线时的答复" "核心答 403，网关按永久错误停掉同步：$sync_line"
+    else
+      extra_item PASS "掉线时的答复" "核心答可重试的错，网关退避后重试：$sync_line"
+    fi
+  else
+    extra_item FAIL "掉线时的答复" "网关没有记录到同步失败：$(docker logs "$gw" --since "$t0" 2>&1 | tail -2 | tr '\n' ' ')"
+  fi
+  if [[ -n "$park_line" ]]; then
+    extra_item PASS "MCP 被停" "MCP 服务器被 park：$park_line"
+  else
+    extra_item FAIL "MCP 被停" "网关没有记录到 MCP 服务器被 park"
+  fi
+  docker start "$tuwunel" >/dev/null
+  for ((i = 0; i < 60; i++)); do
+    health="$(docker inspect -f '{{.State.Health.Status}}' "$tuwunel" 2>/dev/null)" || health=""
+    [[ "$health" == healthy ]] && break
+    sleep 5
+  done
+  if [[ "$health" == healthy ]]; then
+    extra_item PASS "Tuwunel 回来后" "Tuwunel 重新 healthy"
+  else
+    extra_item FAIL "Tuwunel 回来后" "Tuwunel 300 秒没回到 healthy"
+  fi
+  for ((i = 0; i < 60; i++)); do
+    health="$(docker inspect -f '{{.State.Health.Status}}' "$core" 2>/dev/null)" || health=""
+    [[ "$health" == healthy ]] && break
+    sleep 5
+  done
+  if ((i >= 60)); then
+    extra_item FAIL "Tuwunel 回来后" "核心在 Tuwunel 回来后 300 秒没回到 healthy"
+    agent_phone_rejoin || extra_item FAIL "Tuwunel 回来后" "手机接不回核心的网络：$AGENT_WHY"
+    return 0
+  fi
+  if [[ "$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')" != "$before" ]]; then
+    extra_item FAIL "Tuwunel 回来后" "网关容器被重启过，测不出自己重连"
+    return 0
+  fi
+  # 手机要等核心不再重启再建：核心每重启一次就换一个网络命名空间，早建了也接不上。
+  agent_phone_rejoin || extra_item FAIL "Tuwunel 回来后" "手机接不回核心的网络：$AGENT_WHY"
+  agent_need "掉线后工具能调" model || return 0
+  file="$(agent_tmp)"
+  audit_from=0
+  docker exec "$core" test -f "$SMOKE_DATA_DIR/core/audit.jsonl" &&
+    audit_from="$(docker exec "$core" sh -c "wc -l < '$SMOKE_DATA_DIR/core/audit.jsonl'")"
+  sent_at="$(date +%s)"
+  if agent_say --reply any --match 'ai.usemagpie.magpie' --settle 10 --wait 180 \
+      --text '用 wonton__list_plugins 列出已装的插件，输出每项的 id（形如 xxx.yyy.zzz），一个一行，不要解释。' \
+      >"$file" 2>&1 && grep -q 'ai.usemagpie.magpie' "$file"; then
+    reply="$(grep -m1 'ai.usemagpie.magpie' "$file")"
+    if [[ "$audit_from" -gt 0 ]]; then
+      audit_from="$(docker exec "$core" sh -c "tail -n +$((audit_from + 1)) '$SMOKE_DATA_DIR/core/audit.jsonl'" 2>/dev/null |
+        grep -m1 '"tool":"[^"]*list_plugins"')" || audit_from=""
+    fi
+    logs="$(docker logs -t --since "$t0" "$gw" 2>&1)"
+    revived_at="$(sed -n 's/^\([^ ]*\) .*MCP server .wonton.: revived.*/\1/p' <<<"$logs" | head -1)"
+    if [[ -n "$revived_at" ]]; then
+      delta=$(( $(date -d "$revived_at" +%s) - sent_at ))
+      if ((delta < 0)); then
+        when="消息发出前 $((-delta)) 秒 MCP 自己探活恢复"
+      else
+        when="消息发出 ${delta} 秒后 MCP 被叫醒"
+      fi
+      if [[ -n "$audit_from" ]]; then
+        extra_item PASS "掉线后工具能调" "$when（$(awk '{print $1}' <<<"$audit_from")），回答列出插件：$reply"
+      else
+        extra_item PASS "掉线后工具能调" "$when，回答列出插件：$reply"
+      fi
+    else
+      extra_item PASS "掉线后工具能调" "网关没记到 MCP 被叫醒的日志，但回答列出了插件：$reply"
+    fi
+    printf '%s\n' "$(cat "$file")"
+  else
+    extra_item FAIL "掉线后工具能调" "Tuwunel 回来后 Bot 不回消息或调不成工具：$(agent_tail "$(cat "$file")")"
+    printf '%s\n' "$(cat "$file")"
   fi
   rm -f "$file"
 }
