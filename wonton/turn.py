@@ -47,6 +47,11 @@ from .texts import CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_OTHER, CHAIN_SEL
 
 logger = logging.getLogger(__name__)
 
+try:
+    import gateway.session_context as _session_context
+except Exception:  # 上游老版本没有它：只认环境变量
+    _session_context = None
+
 ON_BEHALF_OF = "X-Wonton-On-Behalf-Of"
 SESSION = "wonton-session"
 BOT_TOKEN = "X-Wonton-Bot-Token"
@@ -81,6 +86,9 @@ _S = {
     "warned_list": False,
     "warned_marker": False,
     "worker": None,
+    "webs": {},      # 会话 id -> 刚提交这条会话的网页连接（见 pages.py）
+    "server": None,  # 上游会话表所在的模块，由 pages 装上（gateway 是网关本身，不是它）
+    "page_warned": set(),  # 已经报过“上游会话表换了形状”的会话 id
     "warned": False,
 }
 
@@ -90,6 +98,7 @@ def register(ctx):
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", pre_llm_call)
     ctx.register_hook("on_session_end", on_session_end)
+    ctx.register_hook("on_session_reset", on_session_reset)
 
 
 def _core():
@@ -116,11 +125,9 @@ def _session_var(name):
     context 跑，所以看到的是这一轮自己的值。这一份 context 里从没绑过时（``_UNSET``），上游回落到
     ``os.environ`` 的旧值；清掉是绑成空串，这时拿到的是空串，不再回落。
     """
-    try:
-        from gateway.session_context import get_session_env
-    except Exception:
-        return os.environ.get(name, "")
-    return get_session_env(name)
+    context = sys.modules.get("gateway.session_context") or _session_context
+    get = getattr(context, "get_session_env", None)
+    return get(name) if get is not None else os.environ.get(name, "")
 
 
 def _session_id():
@@ -241,6 +248,86 @@ def _identity(session_id):
     if session_id:
         return {"sender": None, "session": session_id, "room": None, "thread": None}, "只有会话"
     return None, "无"
+
+
+def note_page():
+    """网页控制台连上来了：出箱轮询和 MCP 头只有网关的入站消息会带上，网页不经过它。"""
+    try:
+        _S["loop"] = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    _install_headers()
+    _start_worker()
+
+
+def attach_gateway(server):
+    """记下上游的会话表模块：网页连接关了要按它认人。网关本身在 ``_S["gateway"]``，两回事。"""
+    _S["server"] = server
+
+
+def note_peer(session_id, transport):
+    """这条连接刚提交（或恢复）了这条会话。谁都记：终端页签最后提交时不该让早先的网页顶上。"""
+    if session_id:
+        _S["webs"][session_id] = transport
+    _pages().remember(session_id, transport)
+
+
+def _pages():
+    from . import pages
+
+    return pages
+
+
+def _page_user(transport):
+    """这条连接带的打开者；不是网页连接时 None。"""
+    return _pages().opener_of(transport)
+
+
+def _warn_pages(session_id, reason):
+    """上游形状变了按会话各报一次：同一进程里另一个会话的形状变化还得能看见。"""
+    if session_id in _S["page_warned"]:
+        return None
+    _S["page_warned"].add(session_id)
+    logger.warning("%s，网页连接认不出人（会话 %s）", reason, session_id)
+    return None
+
+
+def _page_sender(session_id):
+    """网页这一轮替谁说话：最后提交这条会话、带着打开者的连接。
+
+    连接在控制台进程里、这一轮在网关进程里跑，提交者从盘上读（``pages.remember`` 写的）。盘上记着却没人
+    （终端页签最后提交的）就不算人。记下的连接已经不在会话里时（关了、被上游拆掉）改由还剩的活连接里最后
+    提交的那条说；没有会话表或一个活连接都没有才退回记录本身。一个带打开者的都没有就不算人，交回上游的
+    ``sender_id``。网页会话没有 Matrix 来源，``pre_gateway_dispatch`` 不来；按轮现取，不缓存到会话。
+    """
+    recorded = _pages().recorded(session_id)
+    server = _S["server"]
+    live = None
+    if server is None:
+        # 没有控制台的进程（定时任务、旧版环境）是常态，不当事故报。
+        logger.debug("没有上游的会话表，网页连接认不出人（会话 %s）", session_id)
+    else:
+        try:
+            live = server._session_live_transports(server._sessions.get(session_id))
+        except AttributeError as exc:
+            _warn_pages(session_id, f"上游的会话表换了形状：{exc!r}")
+    remembered = _S["webs"].get(session_id)
+    # 记下的连接已经不在会话里了（上游拆 Fanout 时子连接的 ``_closed`` 不置位，光看标记发现不了）：记录
+    # 就是它的话已经过时，改由还剩的活连接里最后提交的那条说。别的控制台进程里刚打完字的记录本进程
+    # 不认识它的连接，照旧信记录。
+    stale = (remembered is not None and live is not None
+             and not any(peer is remembered for peer in live)
+             and (recorded is None or _page_user(remembered) == recorded.strip()))
+    if live and stale:
+        for transport in reversed(live):
+            sender = _page_user(transport)
+            if sender:
+                return sender
+    if recorded is not None:
+        return recorded.strip() or None
+    if remembered is not None:
+        return _page_user(remembered)
+    return None
 
 
 def _cron_execution():
@@ -446,10 +533,13 @@ def pre_llm_call(session_id="", sender_id="", **_):
     """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
     # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
     _install_headers()
-    origin = _origin(session_id) or {}
-    sender = sender_id or origin.get("sender")
+    page = _page_sender(session_id)
+    origin = {} if page else (_origin(session_id) or {})
+    sender = page or sender_id or origin.get("sender")
     _remember_for_listing(session_id, sender)
-    if not sender or not origin.get("room") or session_id in _S["reported"]:
+    if not sender or session_id in _S["reported"]:
+        return None
+    if page is None and not origin.get("room"):
         return None
     body = {
         "phase": "start",
@@ -537,11 +627,19 @@ def _refusal_text(refusal, sender, detail=""):
     return f"{text}\n\n{detail}" if detail else text
 
 
+def on_session_reset(session_id=None, old_session_id=None, **_):
+    """会话被重置（``/new`` 等）：旧会话的网页记录没人再读，删掉。"""
+    _pages().forget(old_session_id or session_id)
+
+
 def on_session_end(session_id="", **_):
     """这一轮结束：清身份，报过的链报结束。"""
     if _S["ending"] and session_id not in _S["ending"]:
         logger.warning("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
     _S["active"].pop(session_id, None)
+    _S["webs"].pop(session_id, None)
+    _S["page_warned"].discard(session_id)
+    _pages().forget(session_id)
     _S["unknown"].discard(session_id)
     _S["unknown"].discard("")
     _S["reported"].discard(session_id)

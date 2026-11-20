@@ -71,6 +71,26 @@ Channels 保存凭据到该 Bot 的 `.env`；“Restart to apply” 调用 `herm
 
 Telegram 显式使用核心注入的 `WONTON_PROXY_URL`；未配代理时为空，走直连。Telegram 的凭据和白名单留在 Hermes 原生页面，不增加插件设置字段。没有真实 IM 凭据时只能验证错误反馈，不能据此声称真实渠道已连通。
 
+### 网页控制台里的说话人
+
+插件网页就是 Hermes 原生控制台。在云吞 App 里打开它的人，在控制台对话里说话时按这个人的 Matrix 用户 ID 记，
+不再是只能看的回放。核心把插件网页转给 Hermes 之前，在升级请求上写 `X-Wonton-Web-User`（登录人的 Matrix 用户 ID），
+转发前先剥掉浏览器自己带的同名头，所以插件只认头、不验签。开在 App 里的终端页签经隧道、由设备认出人，同样带头；
+只有不带这条头的连接（真走内部凭据的）照旧按只读。
+
+没有头时插件照原样启动、控制台仍可读；头带着但值不是 Matrix 用户 ID 时上游会把整轮拒掉，控制台里会回一句话说这个
+Bot 不听你的，原因进 Hermes 的日志（默认级别看不到，调高日志级别才能看）。
+网页轮的链没有房间（`room` 为空），`origin` 工具元数据里也不带房间；房间只对 IM 来的那一轮有意义。
+
+认可的是上游内部结构（`WSTransport` 的构造、`server._rebind_live_transport`），`tests/hermes/test_upstream.py` 钉在
+镜像 0.22.7 上：换版本先跑它。
+
+网页后端只在 `plugins.enabled` 里有 `wonton` 时才会被 Hermes 载入：`init_config.py` 每次建容器都补回这一项并从
+`plugins.disabled` 撤掉。老安装缺这一项时 Hermes 整个网页后端不载入，控制台打不开——升级或重装（任一次建容器）就会补上，
+仍然打不开时看 `$HERMES_HOME/config.yaml` 的 `plugins.enabled` 里有没有 `wonton`、或者 `plugins.disabled` 里有没有它。
+控制台的连接是普通的登录连接（`provider: local`，没有 `native_bootstrap`），换代身份时 `profile_id`/`instance_id`
+等字段原样保留，App 的终端页签和桌面控制通道不受影响。
+
 ## 国内 IM 渠道
 
 飞书、钉钉、企业微信（智能机器人）、QQ（官方机器人）、个人微信五个渠道，每个渠道在插件详情页的「设置」里一个开关，
