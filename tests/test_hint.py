@@ -169,6 +169,18 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
             ):
                 self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
 
+    async def test_unexpanded_provider_address_still_prompts(self):
+        # 只把模型改成真值、选中的服务商地址还是占位符：提示照出，请求才不会打到字面地址。
+        config_with = {
+            "model": {"provider": "custom:magpie", "default": "real/model"},
+            "providers": {"magpie": {"api": "${WONTON_MODEL_BASE_URL}"}},
+        }
+        with mock.patch.object(config, "load_config_readonly", return_value=config_with):
+            self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
+        config_with["providers"]["magpie"]["api"] = "http://magpie.internal/v1"
+        with mock.patch.object(config, "load_config_readonly", return_value=config_with):
+            self.assertIsNone(await self.hint())
+
     async def test_provider_without_model_still_prompts(self):
         with mock.patch.object(config, "load_config_readonly", return_value={"model": {"provider": "openrouter"}}):
             self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
