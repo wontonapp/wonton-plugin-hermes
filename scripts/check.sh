@@ -19,6 +19,20 @@ need_plugin
 # 套件自己的命令（logs、diag）的用例：用假 docker，不碰真的 Docker。
 "$root/scripts/dev_test.sh"
 
+# 单测里的替身和上游真库对形状（签名、返回类型）：在清单钉住的 Hermes 镜像里导真模块，偏了就红。
+# 上游改了接口，替身不跟着改的话，单测会绿着骗人。
+hermes_image="$(python3 - "$plugin/docker-compose.yml" <<'PY'
+import re, sys
+
+found = re.search(r"nousresearch/hermes-agent:\S+@sha256:[0-9a-f]{64}", open(sys.argv[1], encoding="utf-8").read())
+sys.exit("清单里没有钉住的 Hermes 镜像") if not found else print(found.group(0))
+PY
+)"
+docker run --rm --network none \
+  --entrypoint /opt/hermes/.venv/bin/python \
+  -v "$plugin:/plugin:ro" -w /plugin "$hermes_image" \
+  -m unittest tests/hermes/test_shapes.py -q
+
 # 核心只在清单 spec 太新时报错，并顺带说出支持到哪一版；插件 spec 旧于核心时静默通过，模板照抄旧 spec 也不吭声。
 # 拿一个必报太新的最小清单去问核心支持到哪版（问不到就不提醒），比清单的 spec 旧就提醒一句。
 spec_reminder() {
