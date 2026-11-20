@@ -17,6 +17,11 @@ MCP 的工具线程拷着那份 context 跑，所以拿到的是这一轮自己�
 都走会话环境那条），所以身份按会话号查 ``_S["active"]`` 和 ``_S["origins"]`` 两张表，不靠“最近一轮”的进程级值。
 只有会话号时带 ``wonton-session``、不带代表头，让核心按会话去认；连会话号也取不到才不带身份。
 
+定时任务跑的时候没有人当场说话，会话环境里也只有 Hermes 自己生成的 cron 会话号，``_identity`` 查不到；
+这时按插件上下文的 ``current_cron_execution()`` 认出手上的任务，读它的 origin 当说话人（见 ``_cron_identity``）。
+委派出去的子代理里上游让它返回 None，改读上游自己的执行标记，子代理同样替创建者说话。
+定时任务是上游从 cron 直接进 Agent 的，没有网关消息，所以工具处理器也在 ``pre_llm_call`` 里包。
+
 上游没有插件能挂的“每次工具调用”钩子，只能包它内部的处理器调用；升级 Hermes 时先复查
 ``tools.mcp_tool_handlers._call_tool_racing_stdio_death`` 和 ``mcp.client.session.ClientSession.call_tool``。
 """
@@ -53,6 +58,7 @@ _S = {
     "loop": None,
     "runner": None,
     "session_store": None,
+    "ctx": None,     # 插件上下文：定时任务执行中从它拿这条执行
     "origins": {},   # 会话 id -> {sender, session_key, room, thread, event_id}
     "pending": {},   # 会话键 -> 同上，会话 id 这时还没有
     "active": {},    # 会话 id -> 准了的这一轮的 {sender, session, room, thread}
@@ -65,6 +71,7 @@ _S = {
 
 
 def register(ctx):
+    _S["ctx"] = ctx
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", pre_llm_call)
     ctx.register_hook("on_session_end", on_session_end)
@@ -219,8 +226,56 @@ def _identity(session_id):
     return None, "无"
 
 
+def _cron_execution():
+    """手上的定时任务执行，没有时 None。
+
+    先问插件上下文；委派出去的子代理里上游特意让它返回 None（``cron/execution_identity.py``），
+    这时退回读上游自己那份执行标记：子代理跑在委派时拷来的 context 里，标记还在，它替同一件事干活。
+    """
+    ctx = _S["ctx"]
+    execution = ctx.current_cron_execution() if ctx is not None else None
+    if execution is not None:
+        return execution
+    try:
+        from cron.execution_identity import _CURRENT
+
+        return _CURRENT.get()
+    except Exception:
+        return None
+
+
+def _cron_identity():
+    """定时任务（含它委派出去的子代理）调工具时替这条任务的创建者说话。没有定时任务时 None。
+
+    定时任务跑的时候没有人当场说话，`_identity` 查不到；任务的 ``origin`` 记着建任务那一轮的会话环境
+    （上游 ``tools/cronjob_job_args._origin_from_env``），``origin`` 是建任务时从会话环境抄的字符串，
+    A 让 Bot 建的任务就按 A 算，模型在工具子进程里改不了它。
+
+    头是插件自报的，核心只核对“这个 Bot 听不听这个人”（和聊天轮一样）；创建者后来不听这个 Bot 了，
+    核心按认不出算、照旧只读，这里不猜。平台不是正好 ``matrix``、没有创建者、任务没了都不带身份。
+    定时任务没有进行中的轮次，子代理也不是一轮，所以只带代表头，不带 ``wonton-session``。
+    """
+    execution = _cron_execution()
+    if execution is None:
+        return None
+    try:
+        from cron.jobs import get_job
+
+        job = get_job(execution.job_id)
+    except Exception as exc:
+        logger.warning("读定时任务 %s 失败，调用不带身份：%r", execution.job_id, exc)
+        return None
+    origin = (job or {}).get("origin") or {}
+    sender = origin.get("user_id")
+    if not sender or origin.get("platform") != "matrix":
+        return None
+    return {"sender": sender, "room": origin.get("chat_id"), "thread": origin.get("thread_id")}
+
+
 def pre_llm_call(session_id="", sender_id="", **_):
     """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
+    # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
+    _install_headers()
     origin = _origin(session_id) or {}
     sender = sender_id or origin.get("sender")
     if not sender or not origin.get("room") or session_id in _S["reported"]:
@@ -395,7 +450,17 @@ def _install_headers():
         env = _session_id()
         turn, source = _identity(env)
         logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
+        if turn is None or turn.get("sender") is None:
+            cron = _cron_identity()
+            if cron is not None:
+                turn, source = cron, "定时任务"
+                logger.debug("MCP 调用来自定时任务：替创建者 %s 说话，不带会话", turn["sender"])
+            elif turn is not None and _cron_execution() is not None:
+                # 定时任务的会话号核心认不出，别拿它去猜别的轮。
+                turn = {**turn, "session": None}
         if turn is None:
+            if source != "轮次":
+                logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
             if env not in _S["unknown"]:
                 _S["unknown"].add(env)
                 if env:
@@ -414,22 +479,42 @@ def _install_headers():
     mcp_tool_handlers._call_tool_racing_stdio_death = call
 
 
+def _stamp_turn(session):
+    """让会话在每次请求的头里带上这一轮的身份。
+
+    上游把 resolve_param_headers 在 ``adopt()`` 时就包进 ``_stamp`` 闭包，之后再换 ``_resolve_param_headers``
+    不起作用；``_stamp`` 每次请求现调，改它才落到线上。``adopt()`` 会换掉 ``_stamp``，包过以后跟着重包。
+    """
+    stamp = session._stamp
+    if getattr(stamp, "_wonton_stamp", False):
+        return
+
+    def with_turn(data, opts):
+        stamp(data, opts)
+        turn = _CURRENT.get()
+        if turn and data.get("method") == "tools/call":
+            headers = opts.setdefault("headers", {})
+            if turn.get("sender"):
+                headers[ON_BEHALF_OF] = turn["sender"]
+            if turn.get("session"):
+                headers[SESSION] = turn["session"]
+
+    with_turn._wonton_stamp = True
+    session._stamp = with_turn
+
+
 def _patch_session(session):
     if getattr(session, "_wonton_turn", False):
         return
     session._wonton_turn = True
-    original_headers = session._resolve_param_headers
+    _stamp_turn(session)
+    original_adopt = session.adopt
 
-    def resolve(name, arguments):
-        headers = dict(original_headers(name, arguments) or {})
-        turn = _CURRENT.get()
-        if turn:
-            if turn.get("sender"):
-                headers[ON_BEHALF_OF] = turn["sender"]
-            headers[SESSION] = turn["session"]
-        return headers
+    def adopt(result):
+        original_adopt(result)
+        _stamp_turn(session)
 
-    session._resolve_param_headers = resolve
+    session.adopt = adopt
     original_call = session.call_tool
 
     async def call_tool(name, arguments=None, *args, **kwargs):

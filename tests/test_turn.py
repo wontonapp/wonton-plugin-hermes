@@ -1,6 +1,7 @@
 """每轮身份头、调用链和出箱：用假的 MCP 会话、网关和核心 HTTP 验证协议字段。"""
 
 import asyncio
+import contextlib
 import contextvars
 import json
 import sys
@@ -24,14 +25,56 @@ sys.modules.setdefault("tools.mcp_tool_handlers", handlers)
 
 mautrix = types.ModuleType("mautrix")
 mautrix_types = types.ModuleType("mautrix.types")
+mautrix_errors = types.ModuleType("mautrix.errors")
 
 class EventType:
     ROOM_MESSAGE = "m.room.message"
 
+class MForbidden(Exception):
+    pass
+
+class MNotFound(Exception):
+    pass
+
 mautrix_types.EventType = EventType
+mautrix_errors.MForbidden = MForbidden
+mautrix_errors.MNotFound = MNotFound
 mautrix.types = mautrix_types
+mautrix.errors = mautrix_errors
 sys.modules.setdefault("mautrix", mautrix)
 sys.modules.setdefault("mautrix.types", mautrix_types)
+sys.modules.setdefault("mautrix.errors", mautrix_errors)
+
+delegation = types.ModuleType("agent.delegation_context")
+_delegated = contextvars.ContextVar("delegated_child", default=False)
+
+@contextlib.contextmanager
+def _delegated_child(session_id=None):
+    token = _delegated.set(True)
+    try:
+        yield
+    finally:
+        _delegated.reset(token)
+
+delegation.delegated_child_context = _delegated_child
+delegation.is_delegated_child_context = lambda: _delegated.get()
+agent = types.ModuleType("agent")
+agent.delegation_context = delegation
+sys.modules.setdefault("agent", agent)
+sys.modules.setdefault("agent.delegation_context", delegation)
+
+executions = types.ModuleType("cron.execution_identity")
+EXECUTION = contextvars.ContextVar("cron_execution", default=None)  # 上游 cron 执行中的那份标记
+executions._CURRENT = EXECUTION
+jobs_module = types.ModuleType("cron.jobs")
+JOBS = {}
+jobs_module.get_job = JOBS.get
+cron = types.ModuleType("cron")
+cron.jobs = jobs_module
+cron.execution_identity = executions
+sys.modules.setdefault("cron", cron)
+sys.modules.setdefault("cron.jobs", jobs_module)
+sys.modules.setdefault("cron.execution_identity", executions)
 
 from wonton import turn  # noqa: E402
 
@@ -97,16 +140,25 @@ class MomEvent:
 
 
 class Session:
+    """上游会话的收发：请求头由 _stamp 每次请求现拼，adopt() 会换掉 _stamp。"""
+
     def __init__(self):
         self.headers = []
         self.calls = []
 
-    def _resolve_param_headers(self, name, arguments):
-        return {"Mcp-Param-Owner": "1"}
+    def _stamp(self, data, opts):
+        if data.get("method") == "tools/call":
+            opts.setdefault("headers", {})["Mcp-Param-Owner"] = "1"
+
+    def adopt(self, result):
+        self._stamp = lambda data, opts: Session._stamp(self, data, opts)
 
     async def call_tool(self, name, arguments=None, **kwargs):
         self.calls.append((name, arguments, kwargs))
-        self.headers.append(self._resolve_param_headers(name, arguments))
+        data = {"method": "tools/call", "params": {"name": name, "arguments": arguments or {}}}
+        opts = {}
+        self._stamp(data, opts)
+        self.headers.append(opts.get("headers", {}))
         return "ok"
 
 
@@ -140,6 +192,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         turn._S.update({
             "loop": None, "runner": None, "session_store": None, "origins": {}, "pending": {},
             "active": {}, "reported": set(), "ending": set(), "worker": True, "unknown": set(),
+            "warned": False, "ctx": None,
         })
         turn._install_headers()
         modules = mock.patch.dict("os.environ", {
@@ -448,6 +501,103 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
         turn.on_session_end(session_id=SID)
         await asyncio.sleep(0.05)
         self.assertEqual([body["phase"] for _, body, _ in self.sent], ["start", "start", "end"])
+
+
+class CronExecution:
+    job_id = "job-1"
+
+
+class CronCtx:
+    """插件上下文中定时任务那一部分：正在执行的任务由它报出。"""
+
+    execution = None
+
+    def register_locale_dir(self, path):
+        pass
+
+    def register_hook(self, name, callback):
+        pass
+
+    def current_cron_execution(self):
+        # 上游在委派出去的子代理里特意返回 None（cron/execution_identity.py）。
+        return None if delegation.is_delegated_child_context() else self.execution
+
+
+class CronCase(TurnCase):
+    def setUp(self):
+        super().setUp()
+        self.ctx = CronCtx()
+        JOBS.clear()
+        JOBS["job-1"] = {"origin": {"platform": "matrix", "chat_id": MOM_ROOM, "user_id": MOM}}
+        EXECUTION.set(None)
+
+    async def cron_call(self):
+        self.env["HERMES_SESSION_ID"] = "cron_job-1_20261120_090000"
+        self.ctx.execution = CronExecution()
+        EXECUTION.set(self.ctx.execution)
+        turn.register(self.ctx)
+        return await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+
+    async def test_a_cron_tool_call_speaks_for_the_job_creator(self):
+        self.assertEqual(await self.cron_call(), "ok")
+        headers = self.server.session.headers[-1]
+        self.assertEqual(headers["X-Wonton-On-Behalf-Of"], MOM)
+        self.assertNotIn("wonton-session", headers)
+        self.assertEqual(headers["Mcp-Param-Owner"], "1")
+
+    async def test_a_reconnect_keeps_carrying_the_creator(self):
+        # adopt() 会换掉会话的 _stamp，换完还得带身份，不然一重连就丢。
+        await self.cron_call()
+        self.server.session.adopt(object())
+        await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+        self.assertEqual(self.server.session.headers[-1]["X-Wonton-On-Behalf-Of"], MOM)
+
+    async def test_a_cron_job_from_another_platform_carries_no_identity(self):
+        JOBS["job-1"] = {"origin": {"platform": "telegram", "chat_id": "42", "user_id": MOM}}
+        await self.cron_call()
+        headers = self.server.session.headers[-1]
+        self.assertNotIn("X-Wonton-On-Behalf-Of", headers)
+        self.assertNotIn("wonton-session", headers)
+
+    async def test_a_cron_job_with_an_odd_platform_value_carries_no_identity(self):
+        JOBS["job-1"] = {"origin": {"platform": "Matrix", "chat_id": MOM_ROOM, "user_id": MOM}}
+        await self.cron_call()
+        self.assertNotIn("X-Wonton-On-Behalf-Of", self.server.session.headers[-1])
+
+    async def test_a_cron_job_without_a_creator_carries_no_identity(self):
+        JOBS["job-1"] = {"origin": {"platform": "matrix", "chat_id": MOM_ROOM}}
+        await self.cron_call()
+        self.assertNotIn("X-Wonton-On-Behalf-Of", self.server.session.headers[-1])
+
+    async def test_a_cron_job_gone_from_the_store_carries_no_identity(self):
+        JOBS.clear()
+        await self.cron_call()
+        self.assertNotIn("X-Wonton-On-Behalf-Of", self.server.session.headers[-1])
+
+    async def test_a_delegated_child_of_a_cron_run_speaks_for_the_creator(self):
+        # 子代理跑在拷来的 context 里，上游的 current_cron_execution() 对它返回 None；执行标记本身还在。
+        self.ctx.execution = CronExecution()
+        EXECUTION.set(self.ctx.execution)
+        turn.register(self.ctx)
+
+        async def child_call():
+            self.bind("HERMES_SESSION_ID", "subagent-1")
+            with delegation.delegated_child_context("subagent-1"):
+                self.assertIsNone(self.ctx.current_cron_execution())
+                return await handlers._call_tool_racing_stdio_death(self.server, "srv", "x", {})
+
+        task = contextvars.copy_context().run(asyncio.create_task, child_call())
+        self.assertEqual(await task, "ok")
+        headers = self.server.session.headers[-1]
+        self.assertEqual(headers["X-Wonton-On-Behalf-Of"], MOM)
+        self.assertNotIn("wonton-session", headers)
+
+    async def test_a_cron_run_installs_the_headers_without_a_gateway_message(self):
+        # 进程中只跑定时任务、没收到过网关消息时，pre_gateway_dispatch 不会来，工具调用靠 pre_llm_call 包。
+        handlers._call_tool_racing_stdio_death = _upstream
+        self.assertFalse(getattr(handlers._call_tool_racing_stdio_death, "_wonton_turn", False))
+        turn.pre_llm_call(session_id="cron_job-1_20261120_090000")
+        self.assertTrue(getattr(handlers._call_tool_racing_stdio_death, "_wonton_turn", False))
 
 
 class OutboxCase(unittest.IsolatedAsyncioTestCase):
