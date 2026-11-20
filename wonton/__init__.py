@@ -82,7 +82,11 @@ def _model_configured() -> bool:
         return True
     if isinstance(model, dict):
         model = model.get("default") or model.get("model")
-    return isinstance(model, str) and bool(model.strip())
+    if not isinstance(model, str) or not model.strip():
+        return False
+    # 升级上来的配置留着上一版写的 `${WONTON_MODEL_DEFAULT}`：核心不再注入这些变量，Hermes 展开不了就原样留着，
+    # 请求会打到字面地址。当作没配，让提示带主人去网页重设。
+    return "${" not in model
 
 
 def send_files_context(**_):
