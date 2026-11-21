@@ -58,7 +58,7 @@ agent_phone() {
 }
 
 agent_phone_up() {
-  local server pairing record hostport
+  local server pairing record hostport i paired
   hostport="${SMOKE_BASE#*://}"
   hostport="${hostport%%/*}"
   AGENT_HOST="${hostport%:*}"
@@ -78,11 +78,16 @@ agent_phone_up() {
   done
   AGENT_CREDENTIAL="$(docker logs "$AGENT_PHONE" 2>&1 | sed -n 's/^会话凭据：//p' | tail -1)"
   [[ -n "$AGENT_CREDENTIAL" ]] || { AGENT_WHY="手机的隧道代理 30 秒没就绪：$(docker logs "$AGENT_PHONE" 2>&1 | tail -3 | tr '\n' ' ')"; return 1; }
-  # 配对码带上回环直连地址（和 proxy 的 --addr 同一个端口）：不带就只能走中继，偶尔要半分钟以上。
-  pairing="$(docker exec "$SMOKE_CORE" wonton-core pair "127.0.0.1:$((AGENT_PORT + 1))" 2>&1 | grep '^wonton://pair?' | tail -1)"
-  [[ -n "$pairing" ]] || { AGENT_WHY="wonton-core pair 没给出配对链接"; return 1; }
-  docker exec "$AGENT_PHONE" tunnel-client --key /tmp/phone.key pair "$pairing" --name 'smoke phone' ||
-    { AGENT_WHY="手机配对被核心拒绝"; return 1; }
+  # 配对码带上回环直连地址（和 proxy 的 --addr 同端口）：不带就只能走中继，偶尔要半分钟以上；核心偶尔拒，重试。
+  paired=""
+  for i in 1 2 3; do
+    pairing="$(docker exec "$SMOKE_CORE" wonton-core pair "127.0.0.1:$((AGENT_PORT + 1))" 2>&1 | grep '^wonton://pair?' | tail -1)"
+    [[ -n "$pairing" ]] || { sleep 2; continue; }
+    docker exec "$AGENT_PHONE" tunnel-client --key /tmp/phone.key pair "$pairing" --name 'smoke phone' >/dev/null 2>&1 &&
+      { paired=1; break; }
+    sleep 2
+  done
+  [[ -n "$paired" ]] || { AGENT_WHY="手机配对被核心拒决（试了 3 次）"; return 1; }
   record="$(docker exec "$SMOKE_CORE" cat "$SMOKE_DATA_DIR/core/plugins/bots/$SMOKE_PLUGIN_ID.json")" ||
     { AGENT_WHY="核心里没有这个插件的 Bot 记录"; return 1; }
   AGENT_ROOM="$(jq -r '.bots.default.home_room // empty' <<<"$record")"
