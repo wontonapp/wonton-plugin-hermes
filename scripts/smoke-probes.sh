@@ -63,6 +63,41 @@ extra_check() {
 
 hermes_gateway() { running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--gateway"; }
 
+
+# 核心重启先开监听、再恢复插件：在网关容器里连续打自己那台 MCP 入口，记第一次拿到的状态和 Retry-After。
+# 403 会被上游当永久错误把 MCP 整轮 park；503 + Retry-After: 5 才按可重试处理（ADR-0111）。
+# <网关> <输出文件>：后台跑并返回 pid；调用方 wait 后读第一行“<状态> <retry-after 或 none>”。
+hermes_mcp_window() {
+  docker exec "$1" sh -c '
+    i=0
+    while [ $i -lt 3000 ]; do
+      c=$(curl -sS -o /dev/null -D /tmp/mcp-window.h -m 1 -w "%{http_code}" -X POST \
+        -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+        -d "{\"jsonrpc\":\"2.0\"}" "$WONTON_MCP_URL" 2>/dev/null) || c=
+      case $c in
+        "" | 000) i=$((i + 1)) ;;
+        *)
+          r=$(sed -n "s/^[Rr]etry-[Aa]fter: *//p" /tmp/mcp-window.h)
+          echo "$c ${r:-none}"
+          exit 0 ;;
+      esac
+    done
+    exit 1' >"$2" 2>/dev/null &
+  echo $!
+}
+
+# <项名> <读到的第一行>：503 要带 Retry-After: 5 才算可重试；403 是上游会整轮 park 的永久错误。
+hermes_recovery_item() {
+  local code retry
+  read -r code retry <<<"$2"
+  case "$code" in
+    503) [[ "$retry" == 5 ]] &&
+      extra_item PASS "$1" "核心恢复期 MCP 入口答 503 + Retry-After: 5（上游按可重试处理）" ||
+      extra_item FAIL "$1" "核心恢复期 MCP 入口答 503 但没带 Retry-After: 5（拿到 $retry）" ;;
+    403) extra_item FAIL "$1" "核心恢复期 MCP 入口答 403（上游按永久错误整轮 park）" ;;
+    *) extra_item FAIL "$1" "核心恢复期 MCP 入口没答对：${2:-没拿到}" ;;
+  esac
+}
 # Tuwunel 是核心 compose 里的服务，容器名由 compose 生成，按服务标签找。
 hermes_tuwunel() {
   docker ps -q --filter "label=com.docker.compose.project=wonton-$SMOKE_INSTANCE" \
@@ -124,12 +159,15 @@ hermes_check_native_restart() {
 # 期间要答可重试的 503（答 403 上游就停掉同步、把 MCP 服务器整轮停下，进程还活着、健康还绿，只有重启网关才好），
 # 重启完私聊照样通、经总线调工具也照样成功。
 hermes_check_core_restart() {
-  local core gw health out file before i
+  local core gw health out file before i mcp_out mcp_pid mcp_first
   agent_need 核心重启后还能聊 || return 0
   core="wonton-$SMOKE_INSTANCE--core"
   gw="$(hermes_gateway)" || { extra_item FAIL 核心重启后还能聊 "找不到 gateway 容器"; return 0; }
   before="$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')"
-  docker restart "$core" >/dev/null 2>&1 || { extra_item FAIL 核心重启后还能聊 "重启核心容器失败"; return 0; }
+  mcp_out="$(mktemp)"
+  docker stop "$core" >/dev/null 2>&1 || { extra_item FAIL 核心重启后还能聊 "停核心容器失败"; return 0; }
+  mcp_pid="$(hermes_mcp_window "$gw" "$mcp_out")"
+  docker start "$core" >/dev/null 2>&1 || { extra_item FAIL 核心重启后还能聊 "启动核心容器失败"; return 0; }
   for ((i = 0; i < 120; i++)); do
     health="$(docker inspect -f '{{.State.Health.Status}}' "$core" 2>/dev/null)" || health=""
     [[ "$health" == healthy ]] && break
@@ -140,8 +178,12 @@ hermes_check_core_restart() {
     extra_item FAIL 核心重启后还能聊 "重启核心把网关容器也重启了，这项就测不出适配器自己重连"
     return 0
   fi
+  wait "$mcp_pid" 2>/dev/null || true
+  mcp_first="$(head -1 "$mcp_out" 2>/dev/null)"
+  rm -f "$mcp_out"
   agent_wait_healthy "$gw" || { extra_item FAIL 核心重启后还能聊 "网关没回到 healthy"; return 0; }
   agent_phone_rejoin || { extra_item FAIL 核心重启后还能聊 "核心重启后手机接不回核心的网络：$AGENT_WHY"; return 0; }
+  hermes_recovery_item 重启恢复期应答 "$mcp_first"
   if out="$(agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
     extra_item PASS 核心重启后还能聊 "重启核心：网关容器没动，同步自己接上，加密私聊照样收发"
   else
@@ -167,7 +209,7 @@ hermes_check_core_restart() {
 # 消息就被叫醒（插件挂 pre_gateway_dispatch）。
 hermes_check_tuwunel_outage() {
   local core gw tuwunel before t0 restarts now logs park_line sync_line
-  local health revived_at sent_at file audit_from reply="-" delta when i out
+  local health revived_at sent_at file audit_from reply="-" delta when i out mcp_out mcp_pid mcp_first
   agent_need "Tuwunel 掉线" || return 0
   core="wonton-$SMOKE_INSTANCE--core"
   gw="$(hermes_gateway)" || { extra_item FAIL "Tuwunel 掉线" "找不到 gateway 容器"; return 0; }
@@ -179,12 +221,17 @@ hermes_check_tuwunel_outage() {
   docker stop "$tuwunel" >/dev/null ||
     { extra_item FAIL "Tuwunel 掉线" "docker stop $tuwunel 失败"; return 0; }
   restarts="$(docker inspect -f '{{.RestartCount}}' "$core")"
-  docker restart "$core" >/dev/null 2>&1 || docker start "$core" >/dev/null 2>&1
+  mcp_out="$(mktemp)"
+  docker stop "$core" >/dev/null 2>/dev/null
+  mcp_pid="$(hermes_mcp_window "$gw" "$mcp_out")"
+  docker start "$core" >/dev/null 2>&1
   for ((i = 0; i < 48; i++)); do
     sleep 5
     now="$(docker inspect -f '{{.RestartCount}}' "$core" 2>/dev/null)" || now="$restarts"
     ((now >= restarts + 2)) && break
   done
+  wait "$mcp_pid" 2>/dev/null || true
+  mcp_first="$(head -1 "$mcp_out" 2>/dev/null)"
   if ((now >= restarts + 2)); then
     extra_item PASS "Tuwunel 掉线" "Tuwunel 停着时核心启动失败、被自己的 restart 策略反复拉起（RestartCount $restarts → $now）"
   else
@@ -202,10 +249,15 @@ hermes_check_tuwunel_outage() {
   else
     extra_item FAIL "掉线时的答复" "网关没有记录到同步失败：$(docker logs "$gw" --since "$t0" 2>&1 | tail -2 | tr '\n' ' ')"
   fi
-  if [[ -n "$park_line" ]]; then
+  # 撞上恢复窗口就有状态码证据；撞不上（窗口只有几百毫秒）时看网关有没有因此 park。
+  if [[ -n "$mcp_first" ]]; then
+    [[ -n "$park_line" ]] &&
+      extra_item PASS "MCP 被停" "核心恢复期 MCP 入口答 ${mcp_first}，网关 park 过 MCP：$park_line" ||
+      hermes_recovery_item "MCP 被停" "$mcp_first"
+  elif [[ -n "$park_line" ]]; then
     extra_item PASS "MCP 被停" "MCP 服务器被 park：$park_line"
   else
-    extra_item FAIL "MCP 被停" "网关没有记录到 MCP 服务器被 park"
+    extra_item FAIL "MCP 被停" "没撞上恢复窗口，网关也没记录到 MCP 服务器被 park"
   fi
   docker start "$tuwunel" >/dev/null
   for ((i = 0; i < 60; i++)); do
