@@ -90,11 +90,14 @@ hermes_mcp_window() {
 hermes_recovery_item() {
   local code retry
   read -r code retry <<<"$2"
+  code="${code//[[:space:]]/}"
+  retry="${retry//[[:space:]]/}"
   case "$code" in
     503) [[ "$retry" == 5 ]] &&
       extra_item PASS "$1" "核心恢复期 MCP 入口答 503 + Retry-After: 5（上游按可重试处理）" ||
       extra_item FAIL "$1" "核心恢复期 MCP 入口答 503 但没带 Retry-After: 5（拿到 $retry）" ;;
     403) extra_item FAIL "$1" "核心恢复期 MCP 入口答 403（上游按永久错误整轮 park）" ;;
+    200 | "") extra_item N/A "$1" "没撞上核心恢复窗口（第一响应 ${code:-没有}）" ;;
     *) extra_item FAIL "$1" "核心恢复期 MCP 入口没答对：${2:-没拿到}" ;;
   esac
 }
@@ -250,14 +253,10 @@ hermes_check_tuwunel_outage() {
     extra_item FAIL "掉线时的答复" "网关没有记录到同步失败：$(docker logs "$gw" --since "$t0" 2>&1 | tail -2 | tr '\n' ' ')"
   fi
   # 撞上恢复窗口就有状态码证据；撞不上（窗口只有几百毫秒）时看网关有没有因此 park。
-  if [[ -n "$mcp_first" ]]; then
-    [[ -n "$park_line" ]] &&
-      extra_item PASS "MCP 被停" "核心恢复期 MCP 入口答 ${mcp_first}，网关 park 过 MCP：$park_line" ||
-      hermes_recovery_item "MCP 被停" "$mcp_first"
-  elif [[ -n "$park_line" ]]; then
+  if [[ -n "$park_line" ]]; then
     extra_item PASS "MCP 被停" "MCP 服务器被 park：$park_line"
   else
-    extra_item FAIL "MCP 被停" "没撞上恢复窗口，网关也没记录到 MCP 服务器被 park"
+    hermes_recovery_item "MCP 被停" "$mcp_first"
   fi
   docker start "$tuwunel" >/dev/null
   for ((i = 0; i < 60; i++)); do

@@ -122,15 +122,16 @@ agent_phone_rejoin() {
 # 用户的一台新设备发消息、等 Bot 回答：参数原样交给 echo-bot probe（--text、--reply、--wait、--settle、--mention…），
 # 标准输出是 probe 的输出（含 Bot 的回答）。每次新设备，登录令牌只用这一次。
 agent_say() {
-  local token i
+  local token deadline
   token=""
-  # 核心刚重启时手机要经中继重新连上，登录令牌可能被吊住：给几分钟重试，别把隧道慢当成同步没接上。
-  for ((i = 0; i < 4; i++)); do
+  # 核心刚重启时手机要经中继重新连上、Bot 侧还要恢复：登录令牌可能被吊住，按总时长重试。
+  deadline=$((SECONDS + ${AGENT_TOKEN_WAIT:-300}))
+  while ((SECONDS < deadline)); do
     token="$(docker run --rm --network "container:$AGENT_PHONE" "$WONTON_SMOKE_CURL_IMAGE" -sS --noproxy '' \
       --max-time 90 -x http://127.0.0.1:18008 -U "$AGENT_CREDENTIAL" -H "Authorization: Bearer $SMOKE_TOKEN" \
       -X POST "http://$AGENT_HOST:$AGENT_PORT/_wonton/matrix/login-token" | jq -r '.token // empty')"
-    [[ -n "$token" ]] && break
-    sleep 5
+    [[ -n $token ]] && break
+    sleep 8
   done
   [[ -n "$token" ]] || { echo "拿不到用户的 Matrix 登录令牌"; return 1; }
   timeout "${AGENT_SAY_TIMEOUT:-$(( ${AGENT_WAIT:-240} + 120 ))}" docker run --rm --network "container:$AGENT_PHONE" \
