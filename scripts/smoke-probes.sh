@@ -66,19 +66,23 @@ hermes_gateway() { running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--gatew
 
 # 核心重启先开监听、再恢复插件：在网关容器里连续打自己那台 MCP 入口，记第一次拿到的状态和 Retry-After。
 # 403 会被上游当永久错误把 MCP 整轮 park；503 + Retry-After: 5 才按可重试处理（ADR-0111）。
-# <网关> <输出文件>：后台跑并返回 pid；调用方 wait 后读第一行“<状态> <retry-after 或 none>”。
+# 请求体用一次真正的握手：rmcp 对解不出 JSON-RPC 消息的体（如只有 {"jsonrpc":"2.0"}）一律答 415，
+# 状态码就看不出恢复期那道门了。连不上时每轮歇 0.2 秒，否则核心还没开监听就把次数烧完。
+# <网关> <输出文件>：后台跑并返回 pid；调用方 wait 后读第一行“<状态> <retry-after 或 none>”，其后是响应体。
 hermes_mcp_window() {
   docker exec "$1" sh -c '
+    body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wonton-smoke\",\"version\":\"0\"}}}"
     i=0
-    while [ $i -lt 3000 ]; do
-      c=$(curl -sS -o /dev/null -D /tmp/mcp-window.h -m 1 -w "%{http_code}" -X POST \
+    while [ $i -lt 1800 ]; do
+      c=$(curl -sS -o /tmp/mcp-window.b -D /tmp/mcp-window.h -m 1 -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
-        -d "{\"jsonrpc\":\"2.0\"}" "$WONTON_MCP_URL" 2>/dev/null) || c=
+        -d "$body" "$WONTON_MCP_URL" 2>/dev/null) || c=
       case $c in
-        "" | 000) i=$((i + 1)) ;;
+        "" | 000) sleep 0.2; i=$((i + 1)) ;;
         *)
           r=$(sed -n "s/^[Rr]etry-[Aa]fter: *//p" /tmp/mcp-window.h)
           echo "$c ${r:-none}"
+          head -c 300 /tmp/mcp-window.b
           exit 0 ;;
       esac
     done
@@ -86,19 +90,21 @@ hermes_mcp_window() {
   echo $!
 }
 
-# <项名> <读到的第一行>：503 要带 Retry-After: 5 才算可重试；403 是上游会整轮 park 的永久错误。
+# <项名> <读到的输出>：503 要带 Retry-After: 5 才算可重试；403 是上游会整轮 park 的永久错误；
+# 2xx 说明窗口已经过了（总线自己答上了）。
 hermes_recovery_item() {
-  local code retry
+  local code retry body
   read -r code retry <<<"$2"
   code="${code//[[:space:]]/}"
   retry="${retry//[[:space:]]/}"
+  body="$(sed -n 2p <<<"$2" | tr -d '\r' | head -c 200)"
   case "$code" in
     503) [[ "$retry" == 5 ]] &&
       extra_item PASS "$1" "核心恢复期 MCP 入口答 503 + Retry-After: 5（上游按可重试处理）" ||
       extra_item FAIL "$1" "核心恢复期 MCP 入口答 503 但没带 Retry-After: 5（拿到 $retry）" ;;
     403) extra_item FAIL "$1" "核心恢复期 MCP 入口答 403（上游按永久错误整轮 park）" ;;
-    200 | "") extra_item N/A "$1" "没撞上核心恢复窗口（第一响应 ${code:-没有}）" ;;
-    *) extra_item FAIL "$1" "核心恢复期 MCP 入口没答对：${2:-没拿到}" ;;
+    2?? | "") extra_item N/A "$1" "没撞上核心恢复窗口（第一响应 ${code:-没有}）" ;;
+    *) extra_item FAIL "$1" "核心恢复期 MCP 入口没答对：${code:-没拿到}${body:+（$body）}" ;;
   esac
 }
 # Tuwunel 是核心 compose 里的服务，容器名由 compose 生成，按服务标签找。
