@@ -99,9 +99,11 @@ hermes_recovery_item() {
   retry="${retry//[[:space:]]/}"
   body="$(sed -n 2p <<<"$2" | tr -d '\r' | head -c 200)"
   case "$code" in
-    503) [[ "$retry" == 5 ]] &&
-      extra_item PASS "$1" "核心恢复期 MCP 入口答 503 + Retry-After: 5（上游按可重试处理）" ||
-      extra_item FAIL "$1" "核心恢复期 MCP 入口答 503 但没带 Retry-After: 5（拿到 $retry）" ;;
+    503) if [[ "$retry" == 5 ]]; then
+      extra_item PASS "$1" "核心恢复期 MCP 入口答 503 + Retry-After: 5（上游按可重试处理）"
+    else
+      extra_item FAIL "$1" "核心恢复期 MCP 入口答 503 但没带 Retry-After: 5（拿到 $retry）"
+    fi ;;
     403) extra_item FAIL "$1" "核心恢复期 MCP 入口答 403（上游按永久错误整轮 park）" ;;
     2?? | "") extra_item N/A "$1" "没撞上核心恢复窗口（第一响应 ${code:-没有}）" ;;
     *) extra_item FAIL "$1" "核心恢复期 MCP 入口没答对：${code:-没拿到}${body:+（$body）}" ;;
