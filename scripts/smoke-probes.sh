@@ -65,7 +65,8 @@ hermes_gateway() { running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--gatew
 
 
 # 核心重启先开监听、再恢复插件：在网关容器里连续打自己那台 MCP 入口，记第一次拿到的状态和 Retry-After。
-# 403 会被上游当永久错误把 MCP 整轮 park；503 + Retry-After: 5 才按可重试处理（ADR-0111）。
+# 上游的 MCP 客户端把 401/403 当永久错误（整轮 park）、503 才走自己的退避重试，这里按这个分：
+# 503 + Retry-After: 5 才算可重试。
 # 请求体用一次真正的握手：rmcp 对解不出 JSON-RPC 消息的体（如只有 {"jsonrpc":"2.0"}）一律答 415，
 # 状态码就看不出恢复期那道门了。连不上时每轮歇 0.2 秒，否则核心还没开监听就把次数烧完。
 # <网关> <输出文件>：后台跑并返回 pid；调用方 wait 后读第一行“<状态> <retry-after 或 none>”，其后是响应体。
