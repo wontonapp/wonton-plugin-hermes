@@ -89,6 +89,7 @@ _S = {
     "webs": {},      # 会话 id -> 刚提交这条会话的网页连接（见 pages.py）
     "server": None,  # 上游会话表所在的模块，由 pages 装上（gateway 是网关本身，不是它）
     "page_warned": set(),  # 已经报过“上游会话表换了形状”的会话 id
+    "dispatched": set(),  # 下一轮由网关派发的会话 id：IM 消息来了，网页的打开者不顶替它
     "warned": False,
 }
 
@@ -182,6 +183,7 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
     }
     if sid:
         _S["origins"][sid] = found
+        _S["dispatched"].add(sid)
         _S["reported"].discard(sid)
     if session_key:
         _S["pending"][session_key] = found
@@ -533,8 +535,11 @@ def pre_llm_call(session_id="", sender_id="", **_):
     """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
     # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
     _install_headers()
-    page = _page_sender(session_id)
-    origin = {} if page else (_origin(session_id) or {})
+    # 网关派发的这一轮（IM 消息）按 IM 的人、房间和事件号算：网页开着这条会话时，开页的人也不能顶掉它。
+    dispatched = session_id in _S["dispatched"]
+    _S["dispatched"].discard(session_id)
+    page = None if dispatched else _page_sender(session_id)
+    origin = _origin(session_id) or {}
     sender = page or sender_id or origin.get("sender")
     _remember_for_listing(session_id, sender)
     if not sender or session_id in _S["reported"]:
@@ -557,6 +562,8 @@ def pre_llm_call(session_id="", sender_id="", **_):
         body["event_id"] = ""
         verdict, refusal, detail = _chain_start(body)
     if verdict == "retry":
+        if dispatched:
+            _S["dispatched"].add(session_id)  # 下一次模型调用还按 IM 算
         return None
     _S["reported"].add(session_id)
     if verdict == "grant":
@@ -629,6 +636,7 @@ def _refusal_text(refusal, sender, detail=""):
 
 def on_session_reset(session_id=None, old_session_id=None, **_):
     """会话被重置（``/new`` 等）：旧会话的网页记录没人再读，删掉。"""
+    _S["dispatched"].discard(old_session_id or session_id)
     _pages().forget(old_session_id or session_id)
 
 
@@ -639,6 +647,7 @@ def on_session_end(session_id="", **_):
     _S["active"].pop(session_id, None)
     _S["webs"].pop(session_id, None)
     _S["page_warned"].discard(session_id)
+    _S["dispatched"].discard(session_id)
     _pages().forget(session_id)
     _S["unknown"].discard(session_id)
     _S["unknown"].discard("")

@@ -274,7 +274,7 @@ def recorded(session_id):
         return (directory / _file_name(session_id)).read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, TypeError) as exc:
         logger.error("读不回这一轮是哪个网页连接提交的，按还开着的取：%r", exc)
         return None
 

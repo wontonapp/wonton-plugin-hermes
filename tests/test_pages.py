@@ -20,15 +20,43 @@ import tui_fake  # noqa: E402
 from wonton import pages, turn  # noqa: E402
 
 ORIGINAL_INIT = tui_fake.WSTransport.__init__
+MOM = "@mom:example.org"
+ROOM = "!room:example.org"
+
+
+class Store:
+    """网关的会话表：派发时按来源算键、拿键换成已有的会话号。"""
+
+    def __init__(self):
+        self.keys = {}
+        self.entries = {}
+
+    def _generate_session_key(self, source, key_source=None):
+        return f"key:{source.chat_id}"
+
+    def peek_session_id(self, session_key):
+        return self.keys.get(session_key)
+
+    def lookup_by_session_id(self, session_id):
+        return self.entries.get(session_id)
+
+
+class Source:
+    chat_id, platform, user_id, thread_id = ROOM, "matrix", MOM, None
+
+
+class Event:
+    message_id = "$event-1"
+    source = Source()
+
 
 SID = "web-session"
-MOM = "@mom:example.org"
 OWNER = "@owner:example.org"
 GATEWAY = {"user_id": "cloud-gateway", "provider": "local", "profile_id": "p1"}
 
 
 def reset():
-    turn._S.update({"loop": None, "worker": True, "webs": {}, "gateway": None, "server": None, "page_warned": set(),
+    turn._S.update({"loop": None, "worker": True, "webs": {}, "gateway": None, "server": None, "page_warned": set(), "dispatched": set(),
                     "warned": False, "reported": set(), "active": {}, "ending": set(), "unknown": set(),
                     "origins": {}, "pending": {}})
     upstream = tui_fake.install(turn)
@@ -180,6 +208,35 @@ class WebIdentityCase(unittest.TestCase):
         self.assertEqual(sender["sender"], MOM)
         self.assertIsNone(sender["room"])
         self.assertEqual(kind, "会话环境")
+
+    def test_an_im_message_on_the_open_session_keeps_its_room(self):
+        connect(OWNER)  # 网页把这条房间会话打开，盘上记着开页的人
+        store = Store()
+        store.keys[f"key:{ROOM}"] = SID
+        turn.pre_gateway_dispatch(event=Event(), session_store=store)
+        bodies = []
+        with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
+            turn.pre_llm_call(session_id=SID, sender_id=MOM)
+        self.assertEqual(bodies[0]["sender"], MOM)
+        self.assertEqual(bodies[0]["room"], ROOM)
+        self.assertEqual(bodies[0]["event_id"], "$event-1")
+        sender, _ = turn._identity(SID)
+        self.assertEqual(sender["sender"], MOM)
+        self.assertEqual(sender["room"], ROOM)
+
+    def test_the_next_page_turn_goes_back_to_the_opener(self):
+        connect(OWNER)
+        store = Store()
+        store.keys[f"key:{ROOM}"] = SID
+        turn.pre_gateway_dispatch(event=Event(), session_store=store)
+        with mock.patch.object(turn, "_chain_start", lambda body: ("grant", "", "")):
+            turn.pre_llm_call(session_id=SID, sender_id=MOM)
+        turn.on_session_end(session_id=SID)  # 这一轮结束了
+        connect(OWNER)  # 这一页又敲了一句
+        bodies = []
+        with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
+            turn.pre_llm_call(session_id=SID, sender_id="cloud-gateway")
+        self.assertEqual(bodies[0]["sender"], OWNER)
 
     def test_a_page_turn_starts_the_chain_without_a_room(self):
         connect(MOM)

@@ -241,7 +241,7 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
             "loop": None, "runner": None, "session_store": None, "origins": {}, "pending": {},
             "active": {}, "reported": set(), "ending": set(), "worker": True, "unknown": set(),
             "warned": False, "ctx": None, "cron_origins": {}, "cron_warned": {}, "last": None,
-            "listed": None, "warned_list": False, "warned_marker": False,
+            "listed": None, "warned_list": False, "warned_marker": False, "dispatched": set(),
         })
         self.server_task = mock.Mock()
         self.server_task._refresh_tools = mock.Mock(return_value="refreshed")
