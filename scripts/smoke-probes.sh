@@ -49,12 +49,21 @@ identity_check() { # 用户的网关会话拿页面注入的 token，进到原�
 
 # Agent 专项：附加检查里用套件的 Agent 助手逐项记子项（见 scripts/agent-probes.sh），加上原生 dashboard 的两项。
 # /version 是网关自己答的命令，不要模型，验加密私聊和原生重启前后都能收发。
-# 各项上限相加最坏 10118 秒：9 次发消息各带 392 秒令牌重试共 3528，两条恢复窗口共 1200，其余的重试和轮询
-# 5390（原生控制台 360、加密私聊 360、重启后还能聊 1260、核心重启 930、Tuwunel 掉线 1350、模型能回话 360、
-# 名单外不应答 770）。每条消息的硬限时是 AGENT_WAIT 240 加 120 秒（--wait 只是探针自己放弃，不封顶）。
+# 各项限时相加最坏 35174 秒：9 次发消息各带 392 秒令牌重试共 3528（agent-probes.sh:128-135），两条恢复窗口
+# 共 1200，其余 30446（原生控制台 360＝三条 120 秒网页请求；加密私聊 996＝起手机读端点 600 agent-probes.sh:68
+# ＋ 30×1 秒等代理、3×2 秒配对 :75-89 ＋ 消息 360 :190；重启后还能聊 22860＝hermes_token、旧进程状态、重启
+# 请求各 120 ＋ 两轮各 90 次（120 秒读 SMOKE_WEB_MAX_TIME lib.sh:54 ＋ 2 秒歇）×2 ＋ 等网关 healthy 180 ＋
+# 消息 360；核心重启 1650＝核心健康轮询 120 ＋ 等网关 healthy 180 ＋ 重连读端点 600（smoke_api 上限
+# SMOKE_API_MAX_TIME lib.sh:55）与 30×1 秒等待 ＋ 两条消息 720；Tuwunel 掉线 2190＝重启次数 48×5、Tuwunel
+# 与核心恢复 60×5 各一 ＋ 重连 630 ＋ 两条消息 720；模型能回话 960＝消息 360 ＋ 一次在跑的卡片轮询读 600
+# agent-probes.sh:373（消息停了这轮也会读完）；MCP工具 660＝list 的 initialize 与首屏、call 的
+# initialize 各 120、调用 300 mcp_client.py:24,33,40；名单外不应答 770＝预检与对照两条消息 720 ＋ 10+30+10
+# 秒窗口）。每条消息的硬限时是 AGENT_WAIT 240 加 120 秒（--wait 只是探针自己放弃，不封顶）。
+# 没有外层限时的 docker exec、MCP list 翻页、卡片回答（每次 600 秒、张数不定）和首次 call 的 probes_confirmer
+# （docker pull、配对 docker run）不计在和里。
 # EXTRA_TIMEOUT 取盖得住这个和的数，最坏情况下后面的子项不会被 probes_hook 杀在超时里；
 # 5400 秒是 stack-slot 的名额 TTL，不是硬超时。
-EXTRA_TIMEOUT=10250
+EXTRA_TIMEOUT=35200
 extra_check() {
   hermes_check_dashboard
   agent_check_chat /version
