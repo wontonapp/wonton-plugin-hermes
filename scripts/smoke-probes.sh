@@ -49,7 +49,8 @@ identity_check() { # 用户的网关会话拿页面注入的 token，进到原�
 
 # Agent 专项：附加检查里用套件的 Agent 助手逐项记子项（见 scripts/agent-probes.sh），加上原生 dashboard 的两项。
 # /version 是网关自己答的命令，不要模型，验加密私聊和原生重启前后都能收发。
-EXTRA_TIMEOUT=2400
+# 两条支路各开一个最多 900 秒的恢复窗口探针，加上健康等待和两条消息的时限，2400 盖不住。
+EXTRA_TIMEOUT=5400
 extra_check() {
   hermes_check_dashboard
   agent_check_chat /version
@@ -68,18 +69,19 @@ hermes_gateway() { running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--gatew
 # 上游的 MCP 客户端把 401/403 当永久错误（整轮 park）、503 才走自己的退避重试，这里按这个分：
 # 503 + Retry-After: 5 才算可重试。
 # 请求体用一次真正的握手：rmcp 对解不出 JSON-RPC 消息的体（如只有 {"jsonrpc":"2.0"}）一律答 415，
-# 状态码就看不出恢复期那道门了。连不上时每轮歇 0.2 秒，否则核心还没开监听就把次数烧完。
+# 状态码就看不出恢复期那道门了。连不上时每轮歇 0.2 秒，否则核心还没开监听就把时间烧完；
+# 按墙钟截止（HERMES_MCP_WINDOW 秒，默认 900），核心接了 TCP 却迟迟不答也烧不光附加检查的限时。
 # <网关> <输出文件>：后台跑并返回 pid；调用方 wait 后读第一行“<状态> <retry-after 或 none>”，其后是响应体。
 hermes_mcp_window() {
   docker exec "$1" sh -c '
     body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wonton-smoke\",\"version\":\"0\"}}}"
-    i=0
-    while [ $i -lt 1800 ]; do
+    end=$(( $(date +%s) + $1 ))
+    while [ "$(date +%s)" -lt "$end" ]; do
       c=$(curl -sS -o /tmp/mcp-window.b -D /tmp/mcp-window.h -m 1 -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
         -d "$body" "$WONTON_MCP_URL" 2>/dev/null) || c=
       case $c in
-        "" | 000) sleep 0.2; i=$((i + 1)) ;;
+        "" | 000) sleep 0.2 ;;
         *)
           r=$(sed -n "s/^[Rr]etry-[Aa]fter: *//p" /tmp/mcp-window.h)
           echo "$c ${r:-none}"
@@ -87,27 +89,34 @@ hermes_mcp_window() {
           exit 0 ;;
       esac
     done
-    exit 1' >"$2" 2>/dev/null &
+    exit 1' sh "${HERMES_MCP_WINDOW:-900}" >"$2" 2>/dev/null &
   echo $!
 }
 
-# <项名> <读到的输出>：503 要带 Retry-After: 5 才算可重试；403 是上游会整轮 park 的永久错误；
-# 2xx 说明窗口已经过了（总线自己答上了）。
+# <场景> <项名> <读到的输出>：503 要带 Retry-After: 5 才算可重试；403 是上游会整轮 park 的永久错误；
+# 2xx 说明窗口已经过了（总线自己答上了）。场景 core 是核心重启：窗口有几分钟，一次都没答说明入口没起来，判 FAIL；
+# 场景 tuwunel 是掉线恢复：窗口只有几百毫秒，没撞上就记 N/A。
 hermes_recovery_item() {
-  local code retry body
-  read -r code retry <<<"$2"
+  local scene="$1" item="$2" code retry body
+  read -r code retry <<<"$3"
   code="${code//[[:space:]]/}"
   retry="${retry//[[:space:]]/}"
-  body="$(sed -n 2p <<<"$2" | tr -d '\r' | head -c 200)"
+  body="$(sed -n 2p <<<"$3" | tr -d '\r' | head -c 200)"
   case "$code" in
     503) if [[ "$retry" == 5 ]]; then
-      extra_item PASS "$1" "核心恢复期 MCP 入口答 503 + Retry-After: 5（上游按可重试处理）"
+      extra_item PASS "$item" "核心恢复期 MCP 入口答 503 + Retry-After: 5（上游按可重试处理）"
     else
-      extra_item FAIL "$1" "核心恢复期 MCP 入口答 503 但没带 Retry-After: 5（拿到 $retry）"
+      extra_item FAIL "$item" "核心恢复期 MCP 入口答 503 但没带 Retry-After: 5（拿到 $retry）"
     fi ;;
-    403) extra_item FAIL "$1" "核心恢复期 MCP 入口答 403（上游按永久错误整轮 park）" ;;
-    2?? | "") extra_item N/A "$1" "没撞上核心恢复窗口（第一响应 ${code:-没有}）" ;;
-    *) extra_item FAIL "$1" "核心恢复期 MCP 入口没答对：${code:-没拿到}${body:+（$body）}" ;;
+    403) extra_item FAIL "$item" "核心恢复期 MCP 入口答 403（上游按永久错误整轮 park）" ;;
+    2??) extra_item N/A "$item" "没撞上核心恢复窗口（第一响应 $code）" ;;
+    "")
+      if [[ "$scene" == core ]]; then
+        extra_item FAIL "$item" "核心重启期间 MCP 入口 ${HERMES_MCP_WINDOW:-900} 秒一次都没答（探针或地址坏了也是这个）"
+      else
+        extra_item N/A "$item" "没撞上核心恢复窗口（第一响应 没有）"
+      fi ;;
+    *) extra_item FAIL "$item" "核心恢复期 MCP 入口没答对：${code:-没拿到}${body:+（$body）}" ;;
   esac
 }
 # Tuwunel 是核心 compose 里的服务，容器名由 compose 生成，按服务标签找。
@@ -193,9 +202,10 @@ hermes_check_core_restart() {
   wait "$mcp_pid" 2>/dev/null || true
   mcp_first="$(head -1 "$mcp_out" 2>/dev/null)"
   rm -f "$mcp_out"
+  # MCP 的状态先记：手机是这次要修的同一类症状，接不回来不该把恢复期证据一起吞掉。
+  hermes_recovery_item core 重启恢复期应答 "$mcp_first"
   agent_wait_healthy "$gw" || { extra_item FAIL 核心重启后还能聊 "网关没回到 healthy"; return 0; }
   agent_phone_rejoin || { extra_item FAIL 核心重启后还能聊 "核心重启后手机接不回核心的网络：$AGENT_WHY"; return 0; }
-  hermes_recovery_item 重启恢复期应答 "$mcp_first"
   if out="$(agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
     extra_item PASS 核心重启后还能聊 "重启核心：网关容器没动，同步自己接上，加密私聊照样收发"
   else
@@ -221,7 +231,7 @@ hermes_check_core_restart() {
 # 消息就被叫醒（插件挂 pre_gateway_dispatch）。
 hermes_check_tuwunel_outage() {
   local core gw tuwunel before t0 restarts now logs park_line sync_line
-  local health revived_at sent_at file audit_from reply="-" delta when i out mcp_out mcp_pid mcp_first
+  local health i out mcp_out mcp_pid mcp_first
   agent_need "Tuwunel 掉线" || return 0
   core="wonton-$SMOKE_INSTANCE--core"
   gw="$(hermes_gateway)" || { extra_item FAIL "Tuwunel 掉线" "找不到 gateway 容器"; return 0; }
@@ -265,7 +275,7 @@ hermes_check_tuwunel_outage() {
   if [[ -n "$park_line" ]]; then
     extra_item PASS "MCP 被停" "MCP 服务器被 park：$park_line"
   else
-    hermes_recovery_item "MCP 被停" "$mcp_first"
+    hermes_recovery_item tuwunel "MCP 被停" "$mcp_first"
   fi
   docker start "$tuwunel" >/dev/null
   for ((i = 0; i < 60; i++)); do
@@ -300,6 +310,14 @@ hermes_check_tuwunel_outage() {
     extra_item FAIL 掉线后还能聊 "Tuwunel 回来后收不到加密回复：$(agent_tail "$out")"
   fi
   printf '%s\n' "$out"
+  hermes_outage_tool "$core" "$gw" "$t0"
+}
+
+# 掉线回来后总线也要自己接上：Bot 要经 wonton__list_plugins 列出预装插件，audit.jsonl 里还要出现新的审计行；
+# MCP 是自己探活回来还是被这条消息叫醒，从网关日志里拿时间对。要模型。
+# <核心> <网关> <掉线起点>：日志和审计只从掉线起点之后看。
+hermes_outage_tool() {
+  local core="$1" gw="$2" t0="$3" file audit_from reply sent_at logs revived_at delta when
   agent_need "掉线后工具能调" model || return 0
   file="$(agent_tmp)"
   audit_from=0
