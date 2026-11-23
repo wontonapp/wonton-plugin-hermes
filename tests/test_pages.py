@@ -50,13 +50,23 @@ class Event:
     source = Source()
 
 
+class Origin:
+    chat_id, platform, user_id, thread_id = ROOM, "matrix", MOM, None
+
+
+class Entry:
+    """盘上的会话表条目：页面轮的结束把内存记录清掉以后，`_origin` 的兜底还得认回会话的来源。"""
+
+    origin = Origin()
+
+
 SID = "web-session"
 OWNER = "@owner:example.org"
 GATEWAY = {"user_id": "cloud-gateway", "provider": "local", "profile_id": "p1"}
 
 
 def reset():
-    turn._S.update({"loop": None, "worker": True, "webs": {}, "gateway": None, "server": None, "page_warned": set(), "dispatched": set(),
+    turn._S.update({"loop": None, "worker": True, "webs": {}, "gateway": None, "server": None, "session_store": None, "page_warned": set(), "dispatched": set(),
                     "warned": False, "reported": set(), "active": {}, "ending": set(), "unknown": set(),
                     "origins": {}, "pending": {}})
     upstream = tui_fake.install(turn)
@@ -237,6 +247,26 @@ class WebIdentityCase(unittest.TestCase):
         with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
             turn.pre_llm_call(session_id=SID, sender_id="cloud-gateway")
         self.assertEqual(bodies[0]["sender"], OWNER)
+
+    def test_a_page_turn_does_not_eat_the_im_dispatch_of_the_next_message(self):
+        connect(OWNER)
+        store = Store()
+        store.keys[f"key:{ROOM}"] = SID
+        store.entries[SID] = Entry()
+        turn.pre_gateway_dispatch(event=Event(), session_store=store)  # IM 的消息先进来了，网页轮先跑
+        bodies = []
+        with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
+            turn.pre_llm_call(session_id=SID, sender_id="cloud-gateway")
+        turn.on_session_end(session_id=SID)  # 网页轮先结束，标记要留给还没跑的 IM 轮
+        with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
+            turn.pre_llm_call(session_id=SID, sender_id=MOM)
+        self.assertEqual(bodies[0]["sender"], OWNER)
+        self.assertEqual(bodies[0]["room"], "")
+        self.assertEqual(bodies[1]["sender"], MOM)
+        self.assertEqual(bodies[1]["room"], ROOM)
+        sender, _ = turn._identity(SID)
+        self.assertEqual(sender["sender"], MOM)
+        self.assertEqual(sender["room"], ROOM)
 
     def test_a_page_turn_starts_the_chain_without_a_room(self):
         connect(MOM)

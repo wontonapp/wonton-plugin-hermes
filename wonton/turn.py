@@ -89,7 +89,7 @@ _S = {
     "webs": {},      # 会话 id -> 刚提交这条会话的网页连接（见 pages.py）
     "server": None,  # 上游会话表所在的模块，由 pages 装上（gateway 是网关本身，不是它）
     "page_warned": set(),  # 已经报过“上游会话表换了形状”的会话 id
-    "dispatched": set(),  # 下一轮由网关派发的会话 id：IM 消息来了，网页的打开者不顶替它
+    "dispatched": set(),  # 网关派发了还没认领的会话 id：说话人对上 IM 的人的那一轮才消费，结束不清、重置才清
     "warned": False,
 }
 
@@ -536,10 +536,17 @@ def pre_llm_call(session_id="", sender_id="", **_):
     # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
     _install_headers()
     # 网关派发的这一轮（IM 消息）按 IM 的人、房间和事件号算：网页开着这条会话时，开页的人也不能顶掉它。
-    dispatched = session_id in _S["dispatched"]
-    _S["dispatched"].discard(session_id)
-    page = None if dispatched else _page_sender(session_id)
+    # 标记记在会话号上，先跑到的网页轮不能把它用掉：说话人对上了才是那一轮（``sender_id`` 是控制台的
+    # ``cloud-gateway``，对不上 IM 的人）。
     origin = _origin(session_id) or {}
+    dispatched = session_id in _S["dispatched"] and (not sender_id or sender_id == origin.get("sender"))
+    if dispatched:
+        _S["dispatched"].discard(session_id)
+    page = None if dispatched else _page_sender(session_id)
+    if page is not None:
+        # 网页轮不带房间和事件号：房间只对 IM 来的那一轮有意义。认不出开页的人（只读连接、没有记录）时
+        # 留着来源，和认不出派发标记时一样按 IM 兜底。
+        origin = {}
     sender = page or sender_id or origin.get("sender")
     _remember_for_listing(session_id, sender)
     if not sender or session_id in _S["reported"]:
@@ -635,7 +642,7 @@ def _refusal_text(refusal, sender, detail=""):
 
 
 def on_session_reset(session_id=None, old_session_id=None, **_):
-    """会话被重置（``/new`` 等）：旧会话的网页记录没人再读，删掉。"""
+    """会话被重置（``/new`` 等）：旧会话的网页记录和派发标记没人再读，删掉。"""
     _S["dispatched"].discard(old_session_id or session_id)
     _pages().forget(old_session_id or session_id)
 
@@ -647,7 +654,7 @@ def on_session_end(session_id="", **_):
     _S["active"].pop(session_id, None)
     _S["webs"].pop(session_id, None)
     _S["page_warned"].discard(session_id)
-    _S["dispatched"].discard(session_id)
+    # 派发标记不清：先结束的这一轮（常是网页轮）不能把还没跑的 IM 那一轮吃掉，只有重置才清。
     _pages().forget(session_id)
     _S["unknown"].discard(session_id)
     _S["unknown"].discard("")
