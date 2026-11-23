@@ -63,7 +63,7 @@ identity_check() { # 用户的网关会话拿页面注入的 token，进到原�
 # 没有外层限时的 docker exec 和首次 call 的 probes_confirmer（docker pull、配对 docker run）不计在和里；
 # 一张在跑的答卡算得出来，列表里多张时张数才不定；MCP list 翻页最多 51 页×120（mcp_client.py:33）没算。
 # EXTRA_TIMEOUT 取盖得住这个和的数，最坏情况下后面的子项不会被 probes_hook 杀在超时里；
-# 5400 秒是 stack-slot 的名额 TTL，不是硬超时。
+# 5400 秒是栈名额的 TTL，不是硬超时。
 EXTRA_TIMEOUT=36700
 extra_check() {
   hermes_check_dashboard
