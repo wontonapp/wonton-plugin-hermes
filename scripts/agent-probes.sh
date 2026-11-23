@@ -58,7 +58,7 @@ agent_phone() {
 }
 
 agent_phone_up() {
-  local server pairing record hostport
+  local server pairing record hostport paired
   hostport="${SMOKE_BASE#*://}"
   hostport="${hostport%%/*}"
   AGENT_HOST="${hostport%:*}"
@@ -78,11 +78,16 @@ agent_phone_up() {
   done
   AGENT_CREDENTIAL="$(docker logs "$AGENT_PHONE" 2>&1 | sed -n 's/^会话凭据：//p' | tail -1)"
   [[ -n "$AGENT_CREDENTIAL" ]] || { AGENT_WHY="手机的隧道代理 30 秒没就绪：$(docker logs "$AGENT_PHONE" 2>&1 | tail -3 | tr '\n' ' ')"; return 1; }
-  # 配对码带上回环直连地址（和 proxy 的 --addr 同一个端口）：不带就只能走中继，偶尔要半分钟以上。
-  pairing="$(docker exec "$SMOKE_CORE" wonton-core pair "127.0.0.1:$((AGENT_PORT + 1))" 2>&1 | grep '^wonton://pair?' | tail -1)"
-  [[ -n "$pairing" ]] || { AGENT_WHY="wonton-core pair 没给出配对链接"; return 1; }
-  docker exec "$AGENT_PHONE" tunnel-client --key /tmp/phone.key pair "$pairing" --name 'smoke phone' ||
-    { AGENT_WHY="手机配对被核心拒绝"; return 1; }
+  # 配对码带上回环直连地址（和 proxy 的 --addr 同端口）：不带就只能走中继，偶尔要半分钟以上；核心偶尔拒，重试。
+  paired=""
+  for _ in 1 2 3; do
+    pairing="$(docker exec "$SMOKE_CORE" wonton-core pair "127.0.0.1:$((AGENT_PORT + 1))" 2>&1 | grep '^wonton://pair?' | tail -1)"
+    [[ -n "$pairing" ]] || { sleep 2; continue; }
+    docker exec "$AGENT_PHONE" tunnel-client --key /tmp/phone.key pair "$pairing" --name 'smoke phone' >/dev/null 2>&1 &&
+      { paired=1; break; }
+    sleep 2
+  done
+  [[ -n "$paired" ]] || { AGENT_WHY="手机配对被核心拒决（试了 3 次）"; return 1; }
   record="$(docker exec "$SMOKE_CORE" cat "$SMOKE_DATA_DIR/core/plugins/bots/$SMOKE_PLUGIN_ID.json")" ||
     { AGENT_WHY="核心里没有这个插件的 Bot 记录"; return 1; }
   AGENT_ROOM="$(jq -r '.bots.default.home_room // empty' <<<"$record")"
@@ -90,13 +95,44 @@ agent_phone_up() {
   [[ -n "$AGENT_ROOM" && -n "$AGENT_BOT" ]] || { AGENT_WHY="Bot 记录里没有主房间或用户 ID"; return 1; }
 }
 
+# 核心一重启，和它共用网络命名空间的手机就只剩 lo：Docker 不把加入方搬进新的命名空间。用原来那把钥匙重新起手机，
+# 还是同一台设备，配对不用重做。
+agent_phone_rejoin() {
+  local server key
+  [[ "$AGENT_PHONE_STATE" == ok ]] || return 1
+  key="${SMOKE_STATE%/*}/phone.key"
+  if [[ ! -f "$key" ]]; then
+    docker cp "$AGENT_PHONE:/tmp/phone.key" "$key" || { AGENT_WHY="取不出手机的隧道钥匙"; return 1; }
+  fi
+  server="$(smoke_api GET /_wonton/api/tunnel | jq -r '.endpoint_id // empty')"
+  [[ -n "$server" ]] || { AGENT_WHY="拿不到核心的隧道端点"; return 1; }
+  docker rm -f "$AGENT_PHONE" >/dev/null 2>&1 || true
+  docker run -d --name "$AGENT_PHONE" --label "wonton.instance=$SMOKE_INSTANCE" \
+    --network "container:$SMOKE_CORE" -v "$key:/tmp/phone.key" --entrypoint sh "$WONTON_SMOKE_TUNNEL_CLIENT_IMAGE" -c \
+    "exec tunnel-client --key /tmp/phone.key proxy --auth --domain $AGENT_HOST --server $server --addr 127.0.0.1:$((AGENT_PORT + 1)) --listen 127.0.0.1:18008" \
+    >/dev/null || { AGENT_WHY="重建手机时隧道客户端起不来"; return 1; }
+  for _ in $(seq 1 30); do
+    docker logs "$AGENT_PHONE" 2>&1 | grep -q '^本地代理' && break
+    sleep 1
+  done
+  AGENT_CREDENTIAL="$(docker logs "$AGENT_PHONE" 2>&1 | sed -n 's/^会话凭据：//p' | tail -1)"
+  [[ -n "$AGENT_CREDENTIAL" ]] || { AGENT_WHY="重建的手机 30 秒没就绪：$(docker logs "$AGENT_PHONE" 2>&1 | tail -3 | tr '\n' ' ')"; return 1; }
+}
+
 # 用户的一台新设备发消息、等 Bot 回答：参数原样交给 echo-bot probe（--text、--reply、--wait、--settle、--mention…），
 # 标准输出是 probe 的输出（含 Bot 的回答）。每次新设备，登录令牌只用这一次。
 agent_say() {
-  local token
-  token="$(docker run --rm --network "container:$AGENT_PHONE" "$WONTON_SMOKE_CURL_IMAGE" -sS --noproxy '' \
-    --max-time 60 -x http://127.0.0.1:18008 -U "$AGENT_CREDENTIAL" -H "Authorization: Bearer $SMOKE_TOKEN" \
-    -X POST "http://$AGENT_HOST:$AGENT_PORT/_wonton/matrix/login-token" | jq -r '.token // empty')"
+  local token deadline
+  token=""
+  # 核心刚重启时手机要经中继重新连上、Bot 侧还要恢复：登录令牌可能被吊住，按总时长重试。
+  deadline=$((SECONDS + ${AGENT_TOKEN_WAIT:-300}))
+  while ((SECONDS < deadline)); do
+    token="$(docker run --rm --network "container:$AGENT_PHONE" "$WONTON_SMOKE_CURL_IMAGE" -sS --noproxy '' \
+      --max-time 90 -x http://127.0.0.1:18008 -U "$AGENT_CREDENTIAL" -H "Authorization: Bearer $SMOKE_TOKEN" \
+      -X POST "http://$AGENT_HOST:$AGENT_PORT/_wonton/matrix/login-token" | jq -r '.token // empty')"
+    [[ -n $token ]] && break
+    sleep 8
+  done
   [[ -n "$token" ]] || { echo "拿不到用户的 Matrix 登录令牌"; return 1; }
   timeout "${AGENT_SAY_TIMEOUT:-$(( ${AGENT_WAIT:-240} + 120 ))}" docker run --rm --network "container:$AGENT_PHONE" \
     "$WONTON_SMOKE_ECHO_BOT_IMAGE" probe --homeserver "http://matrix.$AGENT_HOST:$AGENT_PORT" \
