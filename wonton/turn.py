@@ -89,7 +89,7 @@ _S = {
     "webs": {},      # 会话 id -> 刚提交这条会话的网页连接（见 pages.py）
     "server": None,  # 上游会话表所在的模块，由 pages 装上（gateway 是网关本身，不是它）
     "page_warned": set(),  # 已经报过“上游会话表换了形状”的会话 id
-    "dispatched": set(),  # 网关派发了还没认领的会话 id：说话人对上 IM 的人的那一轮才消费，结束不清、重置才清
+    "dispatched": {},  # 会话 id -> {待认领的发送人: origin}：只有 sender_id 对上的那一轮认领，结束不清、重置才清
     "warned": False,
 }
 
@@ -183,7 +183,7 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
     }
     if sid:
         _S["origins"][sid] = found
-        _S["dispatched"].add(sid)
+        _S["dispatched"].setdefault(sid, {})[sender] = found
         _S["reported"].discard(sid)
     if session_key:
         _S["pending"][session_key] = found
@@ -531,18 +531,41 @@ def _remember_for_listing(session_id, sender):
         logger.warning("按 %s 重取后清单多了：%s", identity["sender"], ", ".join(sorted(added)))
 
 
+def _claim_dispatch(session_id, sender_id):
+    """这一轮是不是网关派发的那条 IM；是就把它自己的来源交出来并清掉标记。
+
+    只认说话人对上的那一条：网页开着这条会话时，先跑到的网页轮、终端页签轮（``sender_id`` 是
+    ``uid:<n>``）都不能把标记用掉；同一条会话几条 IM 连着来时，各人认领各人的来源，后一条盖掉
+    ``_S["origins"]`` 也不影响前一条。
+    """
+    if not sender_id:
+        return None
+    waiting = _S["dispatched"].get(session_id)
+    if not waiting:
+        return None
+    found = waiting.pop(sender_id, None)
+    if found is None:
+        return None
+    if not waiting:
+        _S["dispatched"].pop(session_id, None)
+    # 这个人自己那条消息要另报一次：派发进来的下一轮可能赶在上一条还能跑的时候到，``reported`` 会挡住它。
+    _S["reported"].discard(session_id)
+    return found
+
+
 def pre_llm_call(session_id="", sender_id="", **_):
     """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
     # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
     _install_headers()
     # 网关派发的这一轮（IM 消息）按 IM 的人、房间和事件号算：网页开着这条会话时，开页的人也不能顶掉它。
-    # 标记记在会话号上，先跑到的网页轮不能把它用掉：说话人对上了才是那一轮（``sender_id`` 是控制台的
-    # ``cloud-gateway``，对不上 IM 的人）。
-    origin = _origin(session_id) or {}
-    dispatched = session_id in _S["dispatched"] and (not sender_id or sender_id == origin.get("sender"))
-    if dispatched:
-        _S["dispatched"].discard(session_id)
-    page = None if dispatched else _page_sender(session_id)
+    # 标记按会话号挂在说话人名下，对上的人才认领（控制台是 ``cloud-gateway``，App 页签是 ``uid:<n>``）。
+    dispatched = _claim_dispatch(session_id, sender_id)
+    if dispatched is not None:
+        _S["origins"][session_id] = dispatched
+        origin = dispatched
+    else:
+        origin = _origin(session_id) or {}
+    page = None if dispatched is not None else _page_sender(session_id)
     if page is not None:
         # 网页轮不带房间和事件号：房间只对 IM 来的那一轮有意义。认不出开页的人（只读连接、没有记录）时
         # 留着来源，和认不出派发标记时一样按 IM 兜底。
@@ -569,8 +592,9 @@ def pre_llm_call(session_id="", sender_id="", **_):
         body["event_id"] = ""
         verdict, refusal, detail = _chain_start(body)
     if verdict == "retry":
-        if dispatched:
-            _S["dispatched"].add(session_id)  # 下一次模型调用还按 IM 算
+        if dispatched is not None:
+            # 下一次模型调用还按这条 IM 算。
+            _S["dispatched"].setdefault(session_id, {})[sender] = dispatched
         return None
     _S["reported"].add(session_id)
     if verdict == "grant":
@@ -643,7 +667,7 @@ def _refusal_text(refusal, sender, detail=""):
 
 def on_session_reset(session_id=None, old_session_id=None, **_):
     """会话被重置（``/new`` 等）：旧会话的网页记录和派发标记没人再读，删掉。"""
-    _S["dispatched"].discard(old_session_id or session_id)
+    _S["dispatched"].pop(old_session_id or session_id, None)
     _pages().forget(old_session_id or session_id)
 
 

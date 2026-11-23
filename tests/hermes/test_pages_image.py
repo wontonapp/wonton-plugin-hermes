@@ -56,7 +56,7 @@ class RouteCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.path for r in app.router.routes].count("/api/ws"), 1)
 
     def setUp(self):
-        turn._S.update({"loop": None, "worker": True, "webs": {}, "server": None, "page_warned": set(), "dispatched": set()})
+        turn._S.update({"loop": None, "worker": True, "webs": {}, "server": None, "page_warned": set(), "dispatched": {}})
 
     async def call(self, opener):
         seen, transports = [], []

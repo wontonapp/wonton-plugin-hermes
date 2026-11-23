@@ -45,9 +45,18 @@ class Source:
     chat_id, platform, user_id, thread_id = ROOM, "matrix", MOM, None
 
 
+class DadSource:
+    chat_id, platform, user_id, thread_id = ROOM, "matrix", "@dad:example.org", None
+
+
 class Event:
     message_id = "$event-1"
     source = Source()
+
+
+class DadEvent:
+    message_id = "$event-2"
+    source = DadSource()
 
 
 class Origin:
@@ -66,7 +75,7 @@ GATEWAY = {"user_id": "cloud-gateway", "provider": "local", "profile_id": "p1"}
 
 
 def reset():
-    turn._S.update({"loop": None, "worker": True, "webs": {}, "gateway": None, "server": None, "session_store": None, "page_warned": set(), "dispatched": set(),
+    turn._S.update({"loop": None, "worker": True, "webs": {}, "gateway": None, "server": None, "session_store": None, "page_warned": set(), "dispatched": {},
                     "warned": False, "reported": set(), "active": {}, "ending": set(), "unknown": set(),
                     "origins": {}, "pending": {}})
     upstream = tui_fake.install(turn)
@@ -213,7 +222,7 @@ class WebIdentityCase(unittest.TestCase):
     def test_the_turn_carries_the_opener_and_the_tools_too(self):
         connect(MOM)
         with mock.patch.object(turn, "_chain_start", lambda body: ("grant", {}, "")):
-            turn.pre_llm_call(session_id=SID, sender_id="cloud-gateway")
+            turn.pre_llm_call(session_id=SID, sender_id="uid:1000")
         sender, kind = turn._identity(SID)
         self.assertEqual(sender["sender"], MOM)
         self.assertIsNone(sender["room"])
@@ -245,7 +254,7 @@ class WebIdentityCase(unittest.TestCase):
         connect(OWNER)  # 这一页又敲了一句
         bodies = []
         with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
-            turn.pre_llm_call(session_id=SID, sender_id="cloud-gateway")
+            turn.pre_llm_call(session_id=SID, sender_id="uid:1000")
         self.assertEqual(bodies[0]["sender"], OWNER)
 
     def test_a_page_turn_does_not_eat_the_im_dispatch_of_the_next_message(self):
@@ -256,7 +265,7 @@ class WebIdentityCase(unittest.TestCase):
         turn.pre_gateway_dispatch(event=Event(), session_store=store)  # IM 的消息先进来了，网页轮先跑
         bodies = []
         with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
-            turn.pre_llm_call(session_id=SID, sender_id="cloud-gateway")
+            turn.pre_llm_call(session_id=SID, sender_id="uid:1000")
         turn.on_session_end(session_id=SID)  # 网页轮先结束，标记要留给还没跑的 IM 轮
         with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
             turn.pre_llm_call(session_id=SID, sender_id=MOM)
@@ -268,11 +277,49 @@ class WebIdentityCase(unittest.TestCase):
         self.assertEqual(sender["sender"], MOM)
         self.assertEqual(sender["room"], ROOM)
 
+    def test_two_im_senders_do_not_take_each_others_dispatch(self):
+        connect(OWNER)  # 页面开着这条房间会话：认错的那一轮会退回开页的人
+        store = Store()
+        store.keys[f"key:{ROOM}"] = SID
+        turn.pre_gateway_dispatch(event=Event(), session_store=store)
+        turn.pre_gateway_dispatch(event=DadEvent(), session_store=store)  # 后一条把 origins 盖掉
+        bodies = []
+        with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
+            turn.pre_llm_call(session_id=SID, sender_id=MOM)
+            turn.pre_llm_call(session_id=SID, sender_id=DadSource.user_id)
+        self.assertEqual(bodies[0]["sender"], MOM)
+        self.assertEqual(bodies[0]["room"], ROOM)
+        self.assertEqual(bodies[0]["event_id"], "$event-1")
+        self.assertEqual(bodies[1]["sender"], DadSource.user_id)
+        self.assertEqual(bodies[1]["room"], ROOM)
+        self.assertEqual(bodies[1]["event_id"], "$event-2")
+        self.assertEqual(turn._S["dispatched"], {})
+
+    def test_a_terminal_tab_turn_does_not_take_the_im_dispatch(self):
+        connect(OWNER)
+        store = Store()
+        store.keys[f"key:{ROOM}"] = SID
+        turn.pre_gateway_dispatch(event=Event(), session_store=store)  # IM 先进来，页签的轮先跑
+        bodies = []
+        with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
+            turn.pre_llm_call(session_id=SID, sender_id="uid:1000")
+            turn.pre_llm_call(session_id=SID, sender_id="")  # 认不出设备的连接
+        turn.on_session_end(session_id=SID)  # 页签的轮先结束，标记要留给还没跑的 IM 轮
+        with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
+            turn.pre_llm_call(session_id=SID, sender_id=MOM)
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[0]["sender"], OWNER)
+        self.assertEqual(bodies[0]["room"], "")
+        self.assertEqual(bodies[1]["sender"], MOM)
+        self.assertEqual(bodies[1]["room"], ROOM)
+        self.assertEqual(bodies[1]["event_id"], "$event-1")
+
+
     def test_a_page_turn_starts_the_chain_without_a_room(self):
         connect(MOM)
         bodies = []
         with mock.patch.object(turn, "_chain_start", lambda body: (bodies.append(dict(body)) or ("grant", "", ""))):
-            turn.pre_llm_call(session_id=SID, sender_id="cloud-gateway")
+            turn.pre_llm_call(session_id=SID, sender_id="uid:1000")
         self.assertEqual(bodies[0]["sender"], MOM)
         self.assertEqual(bodies[0]["room"], "")
 
