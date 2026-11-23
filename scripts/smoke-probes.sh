@@ -49,11 +49,12 @@ identity_check() { # 用户的网关会话拿页面注入的 token，进到原�
 
 # Agent 专项：附加检查里用套件的 Agent 助手逐项记子项（见 scripts/agent-probes.sh），加上原生 dashboard 的两项。
 # /version 是网关自己答的命令，不要模型，验加密私聊和原生重启前后都能收发。
-# 各项上限相加最坏 9758 秒：9 次发消息各带 392 秒令牌重试共 3528，两条恢复窗口共 1200，其余的重试和轮询
-# 5030（原生控制台 360、加密私聊 300、重启后还能聊 1200、核心重启 870、Tuwunel 掉线 1290、模型能回话 360、
-# 名单外不应答 650）。EXTRA_TIMEOUT 取盖得住这个和的数，最坏情况下后面的子项不会被 probes_hook 杀在超时里；
+# 各项上限相加最坏 10118 秒：9 次发消息各带 392 秒令牌重试共 3528，两条恢复窗口共 1200，其余的重试和轮询
+# 5390（原生控制台 360、加密私聊 360、重启后还能聊 1260、核心重启 930、Tuwunel 掉线 1350、模型能回话 360、
+# 名单外不应答 770）。每条消息的硬限时是 AGENT_WAIT 240 加 120 秒（--wait 只是探针自己放弃，不封顶）。
+# EXTRA_TIMEOUT 取盖得住这个和的数，最坏情况下后面的子项不会被 probes_hook 杀在超时里；
 # 5400 秒是 stack-slot 的名额 TTL，不是硬超时。
-EXTRA_TIMEOUT=9800
+EXTRA_TIMEOUT=10250
 extra_check() {
   hermes_check_dashboard
   agent_check_chat /version
