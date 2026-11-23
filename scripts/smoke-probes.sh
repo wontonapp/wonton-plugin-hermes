@@ -49,8 +49,8 @@ identity_check() { # 用户的网关会话拿页面注入的 token，进到原�
 
 # Agent 专项：附加检查里用套件的 Agent 助手逐项记子项（见 scripts/agent-probes.sh），加上原生 dashboard 的两项。
 # /version 是网关自己答的命令，不要模型，验加密私聊和原生重启前后都能收发。
-# 两条支路各开一个最多 900 秒的恢复窗口探针，加上健康等待和两条消息的时限，2400 盖不住。
-EXTRA_TIMEOUT=5400
+# 两条支路各最多 600 秒（最坏 1200），加健康等待、令牌和两条消息的时限约 3300：留出整条冒烟 5400 秒的余量。
+EXTRA_TIMEOUT=4800
 extra_check() {
   hermes_check_dashboard
   agent_check_chat /version
@@ -70,7 +70,7 @@ hermes_gateway() { running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--gatew
 # 503 + Retry-After: 5 才算可重试。
 # 请求体用一次真正的握手：rmcp 对解不出 JSON-RPC 消息的体（如只有 {"jsonrpc":"2.0"}）一律答 415，
 # 状态码就看不出恢复期那道门了。连不上时每轮歇 0.2 秒，否则核心还没开监听就把时间烧完；
-# 按墙钟截止（HERMES_MCP_WINDOW 秒，默认 900），核心接了 TCP 却迟迟不答也烧不光附加检查的限时。
+# 按墙钟截止（HERMES_MCP_WINDOW 秒，默认 600），核心接了 TCP 却迟迟不答也烧不光附加检查的限时。
 # <网关> <输出文件>：后台跑并返回 pid；调用方 wait 后读第一行“<状态> <retry-after 或 none>”，其后是响应体。
 hermes_mcp_window() {
   docker exec "$1" sh -c '
@@ -89,7 +89,7 @@ hermes_mcp_window() {
           exit 0 ;;
       esac
     done
-    exit 1' sh "${HERMES_MCP_WINDOW:-900}" >"$2" 2>/dev/null &
+    exit 1' sh "${HERMES_MCP_WINDOW:-600}" >"$2" 2>/dev/null &
   echo $!
 }
 
@@ -112,7 +112,7 @@ hermes_recovery_item() {
     2??) extra_item N/A "$item" "没撞上核心恢复窗口（第一响应 $code）" ;;
     "")
       if [[ "$scene" == core ]]; then
-        extra_item FAIL "$item" "核心重启期间 MCP 入口 ${HERMES_MCP_WINDOW:-900} 秒一次都没答（探针或地址坏了也是这个）"
+        extra_item FAIL "$item" "核心重启期间 MCP 入口 ${HERMES_MCP_WINDOW:-600} 秒一次都没答（探针或地址坏了也是这个）"
       else
         extra_item N/A "$item" "没撞上核心恢复窗口（第一响应 没有）"
       fi ;;
