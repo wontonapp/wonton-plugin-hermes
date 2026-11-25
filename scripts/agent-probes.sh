@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Agent 插件的冒烟助手：扮演用户的手机经隧道发加密消息、等 Bot 回答，验确认卡片、打断、重启、名单外不应答。
+# Agent 插件的冒烟助手：扮演用户的手机经隧道发消息、等 Bot 回答，验确认卡片、打断、重启、名单外不应答。
 # probes.sh 读入它；插件在 smoke-probes.sh 的 extra_check 里按自己有的能力组合这些函数，每个函数记一到几行
 # 附加检查的子项（extra_item），返回值不表示成败。例：
 #
@@ -24,7 +24,7 @@
 # 等确认卡片默认 120 秒，卡片出得慢的 Agent 在探针里设 AGENT_CARD_WAIT（秒）；要模型先想才出卡的给到 300 以上。
 # Agent 默认模式必须出卡的插件（每条命令都要用户确认）设 AGENT_CARD_REQUIRED=1：确认卡片哪一问没出卡都记
 # FAIL，不按“CLI 免确认直接执行”放宽成 N/A；默认 0。
-# 只要 Bot 回了话就算数的（加密私聊、名单外不应答）不要模型：没有模型时 Bot 回的报错也是一条加密回复。
+# 只要 Bot 回了话就算数的（私聊、名单外不应答）不要模型：没有模型时 Bot 回的报错也是一条回复。
 #
 # 有的 Agent 收到提示先回一句状态就把这一轮结束，真活在后台接着跑（后台积压时回“在忙别的”）：要卡片的子项
 # （MCP 工具、确认卡片、打断）开始前先等上一轮真的结束，不然提示叠在积压上，卡片窗口全错过。判据只用能观测到
@@ -40,7 +40,7 @@ AGENT_CARD_EMPTY=""
 AGENT_REQ_ERR=""
 
 # 用户的手机：tunnel-client 进核心的网络命名空间，和核心配对后在 127.0.0.1:18008 开带凭据的代理；
-# echo-bot probe 经它连 Matrix。只起一次，后面的子项共用。起不来时记一行 FAIL 加密私聊（配对坏了是真问题），
+# echo-bot probe 经它连 Matrix。只起一次，后面的子项共用。起不来时记一行 FAIL 私聊（配对坏了是真问题），
 # 没给镜像时什么都不记；返回 1，调用方按 AGENT_PHONE_STATE 记自己的 N/A。
 agent_phone() {
   [[ -z "$AGENT_PHONE_STATE" ]] || { [[ "$AGENT_PHONE_STATE" == ok ]]; return; }
@@ -53,7 +53,7 @@ agent_phone() {
     return 0
   fi
   AGENT_PHONE_STATE="fail:$AGENT_WHY"
-  extra_item FAIL 加密私聊 "$AGENT_WHY"
+  extra_item FAIL 私聊 "$AGENT_WHY"
   return 1
 }
 
@@ -184,13 +184,13 @@ agent_outsider_hit_dump() { # <owner_token> <room_url> <since 毫秒> <outsider 
 # 一行摘要：日志里留全文，结果行里只放末尾一段。
 agent_tail() { tail -c "${2:-200}" <<<"$1" | tr '\n' ' '; }
 
-agent_check_chat() { # [文字]：首次安装后加密私聊收发
+agent_check_chat() { # [文字]：首次安装后私聊收发
   local out
-  agent_need 加密私聊 || return 0
+  agent_need 私聊 || return 0
   if out="$(agent_say --reply any --settle 15 --wait "${AGENT_WAIT:-240}" --text "${1:-请用一句话回答：冒烟。}" 2>&1)"; then
-    extra_item PASS 加密私聊 "用户的新设备发加密消息，收到 Bot 的加密回复"
+    extra_item PASS 私聊 "用户的新设备发消息，收到 Bot 的回复"
   else
-    extra_item FAIL 加密私聊 "没收到 Bot 的加密回复：$(agent_tail "$out")"
+    extra_item FAIL 私聊 "没收到 Bot 的回复：$(agent_tail "$out")"
   fi
   printf '%s\n' "$out"
 }

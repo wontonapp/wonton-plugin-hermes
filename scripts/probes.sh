@@ -17,7 +17,7 @@
 # 有 FAIL 时 DID_FAIL=1，退出码由调用方定；这里的函数不 exit，停不停由调用方决定。
 # 数据探针 data_write / data_check：插件不存用户数据时写 DATA_NA=1（两项记 N/A）。
 DID_FAIL=0
-# Agent 插件用的助手（扮演用户手机发加密消息等），插件在 extra_check 里组合。
+# Agent 插件用的助手（扮演用户手机发消息等），插件在 extra_check 里组合。
 # shellcheck source=scripts/agent-probes.sh
 . "$(dirname "${BASH_SOURCE[0]}")/agent-probes.sh"
 # shellcheck source=scripts/smoke-evidence.sh

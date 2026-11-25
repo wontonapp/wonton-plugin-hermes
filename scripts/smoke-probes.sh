@@ -5,7 +5,7 @@
 #
 # 数据：data 钩子只允许 SMOKE_* 变量和 web_get / dweb，都是打插件网页的通道，页面不写实例数据。
 # Bot 数据目录里能留下的只有 Matrix 会话加密状态和对话历史，钩子约束内（无 docker exec、无 Matrix 配对）
-# 够不到；加密私聊和会话重载在附加检查里实测。因此声明 DATA_NA=1，升级保数据、重装保数据按声明记 N/A。
+# 够不到；私聊和会话重载在附加检查里实测。因此声明 DATA_NA=1，升级保数据、重装保数据按声明记 N/A。
 #
 # 共享验收可能已卸掉预装的 Hermes；仍装着时才保留数据卸载，再由调用方安装工作区版本。
 before_install() {
@@ -48,9 +48,9 @@ identity_check() { # 用户的网关会话拿页面注入的 token，进到原�
 }
 
 # Agent 专项：附加检查里用套件的 Agent 助手逐项记子项（见 scripts/agent-probes.sh），加上原生 dashboard 的两项。
-# /version 是网关自己答的命令，不要模型，验加密私聊和原生重启前后都能收发。
+# /version 是网关自己答的命令，不要模型，验私聊和原生重启前后都能收发。
 # 各项限时相加最坏 36586 秒：9 次发消息各带 392 秒令牌重试共 3528（agent-probes.sh:128-135），两条恢复窗口
-# 共 1200，其余 31858（原生控制台 360＝三条 120 秒网页请求；加密私聊 996＝起手机读端点 600 agent-probes.sh:68
+# 共 1200，其余 31858（原生控制台 360＝三条 120 秒网页请求；私聊 996＝起手机读端点 600 agent-probes.sh:68
 # ＋ 30×1 秒等代理、3×2 秒配对 :75-89 ＋ 消息 360 :190；重启后还能聊 22860＝hermes_token、旧进程状态、重启
 # 请求各 120 ＋ 两轮各 90 次（120 秒读 SMOKE_WEB_MAX_TIME lib.sh:54 ＋ 2 秒歇）×2 ＋ 等网关 healthy 180 ＋
 # 消息 360；核心重启 1650＝核心健康轮询 120 ＋ 等网关 healthy 180 ＋ 重连读端点 600（smoke_api 上限
@@ -232,7 +232,7 @@ agent_phone_up() {
   [[ -n "$AGENT_ROOM" && -n "$AGENT_BOT" ]] || { AGENT_WHY="Bot 记录里没有主房间或用户 ID"; return 1; }
 }
 
-# 原生重启：经 dashboard 重启网关进程（不经 docker restart），进程号要换、容器不重启，之后加密私聊照样通。
+# 原生重启：经 dashboard 重启网关进程（不经 docker restart），进程号要换、容器不重启，之后私聊照样通。
 hermes_check_native_restart() {
   local gw before after status pid old i out
   agent_need 重启后还能聊 || return 0
@@ -259,9 +259,9 @@ hermes_check_native_restart() {
   after="$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')"
   [[ "$before" == "$after" ]] || { extra_item FAIL 重启后还能聊 "原生重启把容器也重建或重启了"; return 0; }
   if out="$(hermes_agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
-    extra_item PASS 重启后还能聊 "经 dashboard 原生重启：网关进程号换了、容器没重启，之后加密私聊照样收发"
+    extra_item PASS 重启后还能聊 "经 dashboard 原生重启：网关进程号换了、容器没重启，之后私聊照样收发"
   else
-    extra_item FAIL 重启后还能聊 "原生重启后收不到加密回复：$(agent_tail "$out")"
+    extra_item FAIL 重启后还能聊 "原生重启后收不到回复：$(agent_tail "$out")"
   fi
   printf '%s\n' "$out"
 }
@@ -297,9 +297,9 @@ hermes_check_core_restart() {
   agent_wait_healthy "$gw" || { extra_item FAIL 核心重启后还能聊 "网关没回到 healthy"; return 0; }
   hermes_phone_rejoin || { extra_item FAIL 核心重启后还能聊 "核心重启后手机接不回核心的网络：${AGENT_WHY:-}"; return 0; }
   if out="$(hermes_agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
-    extra_item PASS 核心重启后还能聊 "重启核心：网关容器没动，同步自己接上，加密私聊照样收发"
+    extra_item PASS 核心重启后还能聊 "重启核心：网关容器没动，同步自己接上，私聊照样收发"
   else
-    extra_item FAIL 核心重启后还能聊 "重启核心后收不到加密回复：$(agent_tail "$out")"
+    extra_item FAIL 核心重启后还能聊 "重启核心后收不到回复：$(agent_tail "$out")"
   fi
   printf '%s\n' "$out"
   # 工具这条要模型：同步接上不等于总线也接上了，MCP 那条要单独验（403 会被上游整轮停掉，只有重启网关才好）。
@@ -395,9 +395,9 @@ hermes_check_tuwunel_outage() {
   # 手机要等核心不再重启再建：核心每重启一次就换一个网络命名空间，早建了也接不上。
   hermes_phone_rejoin || extra_item FAIL "Tuwunel 回来后" "手机接不回核心的网络：${AGENT_WHY:-}"
   if out="$(hermes_agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
-    extra_item PASS 掉线后还能聊 "Tuwunel 回来后加密私聊照样收发"
+    extra_item PASS 掉线后还能聊 "Tuwunel 回来后私聊照样收发"
   else
-    extra_item FAIL 掉线后还能聊 "Tuwunel 回来后收不到加密回复：$(agent_tail "$out")"
+    extra_item FAIL 掉线后还能聊 "Tuwunel 回来后收不到回复：$(agent_tail "$out")"
   fi
   printf '%s\n' "$out"
   hermes_outage_tool "$core" "$gw" "$t0"
