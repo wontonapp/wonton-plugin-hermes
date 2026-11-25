@@ -48,6 +48,8 @@ no/deny 后才执行；300 秒没人回答按拒绝处理（上游 fail-closed�
 显式关闭 `sessions.auto_prune`：保持上游不自动清理会话的默认行为，也不在主人配对前发送低磁盘询问。
 初始配置只在空数据目录中写入，不覆盖已有配置；这项设置不恢复历史消息的密钥。
 
+`agent.clarify_timeout` 钉成 1 小时：上游 v0.23.x 把默认改成 90 秒（终端里用户就在跟前），云吞的聊天是异步的，主人可能过一阵才回；0 或更小是不限时。老 Bot 缺这项时 init 补上，主人自己写过的不动。
+
 wonton 插件每轮在用户消息后附一段引导（wonton/，init 服务放进 Bot 数据目录）：应用的事用那个应用经总线提供的
 工具（tool_search 目录的「wonton tools」组，先 `tool_describe` 拿参数、再 `tool_call` 调），这些工具的身份由
 云吞带好，不让用户去应用网页生成令牌或粘贴密钥；调不通就如实说哪一步没走通，不改存本地文件。上游把 MCP 工具
@@ -81,7 +83,7 @@ Memos 这类应用的内容就这样存丢。已有 Bot 重建容器时 init 补
 
 Hermes 的回环 dashboard 把临时 token 注入 HTML，原生前端通过 `X-Hermes-Session-Token` 或 WebSocket 的 `token` 参数传回；裸请求返回 401 不等于核心登录失效。每次刷新由原生页面重新取得 token，不另建 Hermes 账号。
 
-使用官方 Hermes v0.22.7，包含 [上游 #145738](https://github.com/NousResearch/hermes-agent/pull/145738) 对镜像内 payload 清单路径的修复（[问题 #138990](https://github.com/NousResearch/hermes-agent/issues/138990)）。dashboard 的重启子命令直接使用镜像自带依赖，不在每个 Bot 的数据目录额外复制和安装一套运行依赖。
+使用官方 Hermes v0.23.4，包含 [上游 #145738](https://github.com/NousResearch/hermes-agent/pull/145738) 对镜像内 payload 清单路径的修复（[问题 #138990](https://github.com/NousResearch/hermes-agent/issues/138990)）。dashboard 的重启子命令直接使用镜像自带依赖，不在每个 Bot 的数据目录额外复制和安装一套运行依赖。
 
 Channels 保存凭据到该 Bot 的 `.env`；“Restart to apply” 调用 `hermes -p default gateway restart --interrupt`，由原生 s6 替换 gateway 进程，dashboard 和容器继续运行。当前对话可能被中断，Matrix 由 gateway 重连。按钮返回成功只代表已启动重启命令，验证还需核对 action 的退出码、gateway 新 PID 和渠道状态。
 
@@ -101,7 +103,7 @@ Bot 不听你的，原因进 Hermes 的日志（默认级别看不到，调高�
 人、房间和事件号算。
 
 认可的是上游内部结构（`WSTransport` 的构造、`server._rebind_live_transport`），`tests/hermes/test_upstream.py` 钉在
-镜像 0.22.7 上：换版本先跑它。
+镜像 0.23.4 上：换版本先跑它。
 
 网页后端只在 `plugins.enabled` 里有 `wonton` 时才会被 Hermes 载入：`init_config.py` 每次建容器都补回这一项并从
 `plugins.disabled` 撤掉。老安装缺这一项时 Hermes 整个网页后端不载入，控制台打不开——升级或重装（任一次建容器）就会补上，
