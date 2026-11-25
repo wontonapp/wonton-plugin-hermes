@@ -194,6 +194,43 @@ hermes_agent_say() {
   return "$rc"
 }
 
+# 套件的 agent_phone_up 只试一次配对。核心冷启动时实测约一半会被拒（pairing connection ended，
+# 客户端报 pairing did not finish），重试三次再算；变量和后面的 agent_say / hermes_phone_rejoin 共用。
+# shellcheck disable=SC2153 # SMOKE_CORE 是套件在运行时给的
+agent_phone_up() {
+  local server pairing record hostport try
+  hostport="${SMOKE_BASE#*://}"
+  hostport="${hostport%%/*}"
+  AGENT_HOST="${hostport%:*}"
+  AGENT_PORT="${hostport##*:}"
+  AGENT_PHONE="wonton-$SMOKE_INSTANCE--smoke-phone"
+  docker rm -f "$AGENT_PHONE" >/dev/null 2>&1 || true
+  server="$(smoke_api GET /_wonton/api/tunnel | jq -r '.endpoint_id // empty')"
+  [[ -n "$server" ]] || { AGENT_WHY="拿不到核心的隧道端点"; return 1; }
+  docker run -d --name "$AGENT_PHONE" --label "wonton.instance=$SMOKE_INSTANCE" \
+    --network "container:$SMOKE_CORE" --entrypoint sh "$WONTON_SMOKE_TUNNEL_CLIENT_IMAGE" -c \
+    "tunnel-client --key /tmp/phone.key id && exec tunnel-client --key /tmp/phone.key proxy --auth --domain $AGENT_HOST --server $server --addr 127.0.0.1:$((AGENT_PORT + 1)) --listen 127.0.0.1:18008" \
+    >/dev/null || { AGENT_WHY="手机的隧道客户端起不来（$WONTON_SMOKE_TUNNEL_CLIENT_IMAGE）"; return 1; }
+  for _ in $(seq 1 30); do
+    docker logs "$AGENT_PHONE" 2>&1 | grep -q '^本地代理' && break
+    sleep 1
+  done
+  AGENT_CREDENTIAL="$(docker logs "$AGENT_PHONE" 2>&1 | sed -n 's/^会话凭据：//p' | tail -1)"
+  [[ -n "$AGENT_CREDENTIAL" ]] || { AGENT_WHY="手机的隧道代理 30 秒没就绪：$(docker logs "$AGENT_PHONE" 2>&1 | tail -3 | tr '\n' ' ')"; return 1; }
+  for try in 1 2 3; do
+    pairing="$(docker exec "$SMOKE_CORE" wonton-core pair "127.0.0.1:$((AGENT_PORT + 1))" 2>&1 | grep '^wonton://pair?' | tail -1)"
+    [[ -n "$pairing" ]] || { AGENT_WHY="wonton-core pair 没给出配对链接"; return 1; }
+    docker exec "$AGENT_PHONE" tunnel-client --key /tmp/phone.key pair "$pairing" --name 'smoke phone' && break
+    AGENT_WHY="手机配对被核心拒绝（试了 $try 次）"
+    sleep 2
+  done
+  record="$(docker exec "$SMOKE_CORE" cat "$SMOKE_DATA_DIR/core/plugins/bots/$SMOKE_PLUGIN_ID.json")" ||
+    { AGENT_WHY="核心里没有这个插件的 Bot 记录"; return 1; }
+  AGENT_ROOM="$(jq -r '.bots.default.home_room // empty' <<<"$record")"
+  AGENT_BOT="$(jq -r '.bots.default.user_id // empty' <<<"$record")"
+  [[ -n "$AGENT_ROOM" && -n "$AGENT_BOT" ]] || { AGENT_WHY="Bot 记录里没有主房间或用户 ID"; return 1; }
+}
+
 # 原生重启：经 dashboard 重启网关进程（不经 docker restart），进程号要换、容器不重启，之后加密私聊照样通。
 hermes_check_native_restart() {
   local gw before after status pid old i out
