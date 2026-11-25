@@ -1,4 +1,4 @@
-"""钉住依赖的上游形状（Hermes 0.22.7）：控制台的 WebSocket 入口、身份传到连接类、会话表里认得住来源，
+"""钉住依赖的上游形状（Hermes 0.23.4）：控制台的 WebSocket 入口、身份传到连接类、会话表里认得住来源，
 以及终端那条连接替哪个会话收键、身份怎么落在连接上。
 
 镜像自己记着版本（``/opt/hermes/install-stamp.json``）。版本一变先来这里看：``wonton/pages.py`` 认的就是
@@ -16,7 +16,7 @@ from hermes_cli import pty_session
 from hermes_cli.web_routers import chat_ws
 from tui_gateway import server, session_lifecycle, session_reaper, session_transports, ws
 
-PIN = "0.22.7"
+PIN = "0.23.4"
 REBIND = None
 
 
