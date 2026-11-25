@@ -124,13 +124,13 @@ services:
       MATRIX_HOMESERVER: ${WONTON_MATRIX_HOMESERVER}
       MATRIX_USER_ID: ${WONTON_MATRIX_USER_ID}
       MATRIX_ACCESS_TOKEN: ${WONTON_MATRIX_ACCESS_TOKEN}
-      # Bot 只听名单里的人；主房间是核心替主人建的加密私聊，定时任务结果发到这里。
+      # Bot 只听名单里的人；主房间是核心替主人建的私聊，定时任务结果发到这里。
       # 变量名是 MATRIX_HOME_ROOM，不是 Hermes 插件清单里写的 MATRIX_HOME_CHANNEL。
       MATRIX_ALLOWED_USERS: ${WONTON_MATRIX_ALLOWED_USERS:?需要主人的 Matrix 用户 ID}
       MATRIX_HOME_ROOM: ${WONTON_MATRIX_HOME_ROOM}
-      # 主流客户端默认加密私聊；依赖缺失时直接失败，不静默退回明文。
-      MATRIX_E2EE_MODE: required
-      # 交叉签名的恢复密钥写在这里，核心收走保管（x-wonton.secrets.matrix_recovery_key）。
+      # 房间都不加密，不初始化端到端加密；旧的加密房间由后续版本决定还要不要读。
+      MATRIX_E2EE_MODE: "off"
+      # 交叉签名的恢复密钥写在这个文件里（不加密时不写），核心声明了 matrix_recovery_key 时收走保管。
       MATRIX_RECOVERY_KEY_OUTPUT_FILE: /opt/data/platforms/matrix/recovery-key.txt
       # tools：核心的 MCP 总线（核心和其他插件的工具），config.yaml 的 mcp_servers.wonton 引用。
       WONTON_MCP_URL: ${WONTON_MCP_URL}
@@ -238,7 +238,7 @@ x-wonton:
     zh: |
       Nous Research 家的通用 AI 助手：在 App 里和它私聊，它能上网查资料、用你装的应用提供的工具、读你允许它看的文件夹。
 
-      消息走加密的 Matrix 私聊。模型用 Hermes 自带的接入：打开它的网页，在 Keys 页填 AI 服务商的 API key 或登录订阅，再在 Models 页选模型；没选好之前它会告诉你去哪里设，不会偷偷换成别的服务。key 和登录信息存在这个 Bot 自己的数据里。经云吞装卸插件这类操作要你在卡片上确认；Hermes 自带的终端、文件和浏览器工具在它自己的容器里直接运行，能读写这个 Bot 的数据（含密钥）、能联网，碰不到你的共享文件夹和别的插件的数据。
+      消息走 Matrix 私聊。模型用 Hermes 自带的接入：打开它的网页，在 Keys 页填 AI 服务商的 API key 或登录订阅，再在 Models 页选模型；没选好之前它会告诉你去哪里设，不会偷偷换成别的服务。key 和登录信息存在这个 Bot 自己的数据里。经云吞装卸插件这类操作要你在卡片上确认；Hermes 自带的终端、文件和浏览器工具在它自己的容器里直接运行，能读写这个 Bot 的数据（含密钥）、能联网，碰不到你的共享文件夹和别的插件的数据。
 
       国内办公 IM 渠道（飞书、钉钉、企业微信、QQ 机器人、个人微信）在插件详情页的「设置」里逐个启用：去对应平台的
       开放平台建一个机器人应用，把应用 ID 和密钥填进来、打开开关。这些聊天只出现在那个 IM 里，不进云吞 App 的聊天页；
@@ -247,7 +247,7 @@ x-wonton:
     en: |
       An all-round AI assistant by Nous Research: chat with it privately in the app, and it can search the web, use the tools your apps provide and read the folders you allow.
 
-      Messages travel in an encrypted Matrix chat. It uses Hermes's own model setup: open its web page, add an AI provider's API key or sign in under Keys, then pick a model under Models; until then it tells you where to set it up rather than silently switching services. Keys and sign-ins are stored in this Bot's own data. Actions through Wonton, such as installing plugins, wait for your confirmation card. Hermes's terminal, file and browser tools run directly in its container: they can read and write this Bot's data, including secrets, and access the network, but not your shared folders or other apps' data.
+      Messages travel in a Matrix chat. It uses Hermes's own model setup: open its web page, add an AI provider's API key or sign in under Keys, then pick a model under Models; until then it tells you where to set it up rather than silently switching services. Keys and sign-ins are stored in this Bot's own data. Actions through Wonton, such as installing plugins, wait for your confirmation card. Hermes's terminal, file and browser tools run directly in its container: they can read and write this Bot's data, including secrets, and access the network, but not your shared folders or other apps' data.
 
       CN office-IM channels (Feishu, DingTalk, WeCom, QQ bot, personal WeChat) are enabled one by one in the plugin's settings: create a bot app on the platform's console, fill in the app ID and secret, and turn the switch on. These chats live only in that IM, not in the Wonton app's chat page; personal WeChat supports direct messages only and needs a one-time scan login from a terminal on the server (steps in the plugin README). Telegram is configured on the Channels page of the Hermes web page and uses Wonton's outbound proxy.
   release_notes:
