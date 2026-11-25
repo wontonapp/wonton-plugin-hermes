@@ -156,6 +156,44 @@ hermes_check_dashboard() {
   fi
 }
 
+# 核心重启会换网络命名空间，和核心共网络的手机容器要按原来那把钥匙重建（还是同一台配对过的设备）。
+# shellcheck disable=SC2153 # SMOKE_CORE 是套件在运行时给的
+# 模板套件把 agent_phone_rejoin 删了，插件自带一份，套件新旧都能跑。
+hermes_phone_rejoin() {
+  [[ "$AGENT_PHONE_STATE" == ok ]] || return 1
+  local key="${SMOKE_STATE%/*}/phone.key" server
+  [[ -f "$key" ]] || docker cp "$AGENT_PHONE:/tmp/phone.key" "$key" ||
+    { AGENT_WHY="取不出手机的隧道钥匙"; return 1; }
+  server="$(smoke_api GET /_wonton/api/tunnel | jq -r '.endpoint_id // empty')"
+  [[ -n "$server" ]] || { AGENT_WHY="拿不到核心的隧道端点"; return 1; }
+  docker rm -f "$AGENT_PHONE" >/dev/null 2>&1 || true
+  docker run -d --name "$AGENT_PHONE" --label "wonton.instance=$SMOKE_INSTANCE" \
+    --network "container:$SMOKE_CORE" --entrypoint sh "$WONTON_SMOKE_TUNNEL_CLIENT_IMAGE" -c \
+    "exec tunnel-client --key /tmp/phone.key proxy --auth --domain $AGENT_HOST --server $server --addr 127.0.0.1:$((AGENT_PORT + 1)) --listen 127.0.0.1:18008" >/dev/null
+  for _ in $(seq 1 30); do
+    docker logs "$AGENT_PHONE" 2>&1 | grep -q '^本地代理' && break
+    sleep 1
+  done
+  docker logs "$AGENT_PHONE" 2>&1 | grep -q '^本地代理' ||
+    { AGENT_WHY="手机的隧道代理 30 秒没就绪：$(docker logs "$AGENT_PHONE" 2>&1 | tail -3 | tr '\n' ' ')"; return 1; }
+  AGENT_CREDENTIAL="$(docker logs "$AGENT_PHONE" 2>&1 | sed -n 's/^会话凭据：//p' | tail -1)"
+  [[ -n "$AGENT_CREDENTIAL" ]]
+}
+
+# 套件取一次 Matrix 登录令牌；核心刚装好、Tuwunel 刚恢复时这一下偶尔回非 JSON（jq parse error，实测），
+# 重试几次再算。只在取令牌失败时重试，消息不会重复；别的错原样返回。
+hermes_agent_say() {
+  local out rc=0 i
+  for i in 1 2 3; do
+    out="$(agent_say "$@" 2>&1)" && { printf '%s\n' "$out"; return 0; }
+    rc=$?
+    grep -q '拿不到用户的 Matrix 登录令牌' <<<"$out" || { printf '%s\n' "$out"; return "$rc"; }
+    sleep 2
+  done
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
 # 原生重启：经 dashboard 重启网关进程（不经 docker restart），进程号要换、容器不重启，之后加密私聊照样通。
 hermes_check_native_restart() {
   local gw before after status pid old i out
@@ -182,7 +220,7 @@ hermes_check_native_restart() {
   agent_wait_healthy "$gw" || { extra_item FAIL 重启后还能聊 "原生重启后容器没回到 healthy"; return 0; }
   after="$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')"
   [[ "$before" == "$after" ]] || { extra_item FAIL 重启后还能聊 "原生重启把容器也重建或重启了"; return 0; }
-  if out="$(agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
+  if out="$(hermes_agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
     extra_item PASS 重启后还能聊 "经 dashboard 原生重启：网关进程号换了、容器没重启，之后加密私聊照样收发"
   else
     extra_item FAIL 重启后还能聊 "原生重启后收不到加密回复：$(agent_tail "$out")"
@@ -219,8 +257,8 @@ hermes_check_core_restart() {
   # MCP 的状态先记：手机是这次要修的同一类症状，接不回来不该把恢复期证据一起吞掉。
   hermes_recovery_item core 重启恢复期应答 "$mcp_first"
   agent_wait_healthy "$gw" || { extra_item FAIL 核心重启后还能聊 "网关没回到 healthy"; return 0; }
-  agent_phone_rejoin || { extra_item FAIL 核心重启后还能聊 "核心重启后手机接不回核心的网络：$AGENT_WHY"; return 0; }
-  if out="$(agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
+  hermes_phone_rejoin || { extra_item FAIL 核心重启后还能聊 "核心重启后手机接不回核心的网络：${AGENT_WHY:-}"; return 0; }
+  if out="$(hermes_agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
     extra_item PASS 核心重启后还能聊 "重启核心：网关容器没动，同步自己接上，加密私聊照样收发"
   else
     extra_item FAIL 核心重启后还能聊 "重启核心后收不到加密回复：$(agent_tail "$out")"
@@ -229,7 +267,7 @@ hermes_check_core_restart() {
   # 工具这条要模型：同步接上不等于总线也接上了，MCP 那条要单独验（403 会被上游整轮停掉，只有重启网关才好）。
   agent_need 核心重启后还能调工具 model || return 0
   file="$(agent_tmp)"
-  if agent_say --reply any --settle 10 --wait "${AGENT_WAIT:-240}" \
+  if hermes_agent_say --reply any --settle 10 --wait "${AGENT_WAIT:-240}" \
       --text '用 wonton__list_plugins 列出已装的插件，输出每项的 id（形如 xxx.yyy.zzz），一个一行，不要解释。' \
       >"$file" 2>&1 && grep -q 'ai.usemagpie.magpie' "$file"; then
     extra_item PASS 核心重启后还能调工具 "重启核心后 Bot 经总线调 wonton__list_plugins 成功，回答里有预装的模型网关"
@@ -309,7 +347,7 @@ hermes_check_tuwunel_outage() {
   done
   if ((i >= 60)); then
     extra_item FAIL "Tuwunel 回来后" "核心在 Tuwunel 回来后 300 秒没回到 healthy"
-    agent_phone_rejoin || extra_item FAIL "Tuwunel 回来后" "手机接不回核心的网络：$AGENT_WHY"
+    hermes_phone_rejoin || extra_item FAIL "Tuwunel 回来后" "手机接不回核心的网络：${AGENT_WHY:-}"
     return 0
   fi
   if [[ "$(docker inspect "$gw" --format '{{.Id}} {{.State.StartedAt}}')" != "$before" ]]; then
@@ -317,8 +355,8 @@ hermes_check_tuwunel_outage() {
     return 0
   fi
   # 手机要等核心不再重启再建：核心每重启一次就换一个网络命名空间，早建了也接不上。
-  agent_phone_rejoin || extra_item FAIL "Tuwunel 回来后" "手机接不回核心的网络：$AGENT_WHY"
-  if out="$(agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
+  hermes_phone_rejoin || extra_item FAIL "Tuwunel 回来后" "手机接不回核心的网络：${AGENT_WHY:-}"
+  if out="$(hermes_agent_say --reply any --settle 5 --wait 180 --text /version 2>&1)"; then
     extra_item PASS 掉线后还能聊 "Tuwunel 回来后加密私聊照样收发"
   else
     extra_item FAIL 掉线后还能聊 "Tuwunel 回来后收不到加密回复：$(agent_tail "$out")"
@@ -338,7 +376,7 @@ hermes_outage_tool() {
   docker exec "$core" test -f "$SMOKE_DATA_DIR/core/audit.jsonl" &&
     audit_from="$(docker exec "$core" sh -c "wc -l < '$SMOKE_DATA_DIR/core/audit.jsonl'")"
   sent_at="$(date +%s)"
-  if agent_say --reply any --match 'ai.usemagpie.magpie' --settle 10 --wait 180 \
+  if hermes_agent_say --reply any --match 'ai.usemagpie.magpie' --settle 10 --wait 180 \
       --text '用 wonton__list_plugins 列出已装的插件，输出每项的 id（形如 xxx.yyy.zzz），一个一行，不要解释。' \
       >"$file" 2>&1 && grep -q 'ai.usemagpie.magpie' "$file"; then
     reply="$(grep -m1 'ai.usemagpie.magpie' "$file")"
