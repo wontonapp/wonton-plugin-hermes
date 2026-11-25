@@ -198,7 +198,7 @@ hermes_agent_say() {
 # 客户端报 pairing did not finish），重试三次再算；变量和后面的 agent_say / hermes_phone_rejoin 共用。
 # shellcheck disable=SC2153 # SMOKE_CORE 是套件在运行时给的
 agent_phone_up() {
-  local server pairing record hostport try
+  local server pairing record hostport try paired=0
   hostport="${SMOKE_BASE#*://}"
   hostport="${hostport%%/*}"
   AGENT_HOST="${hostport%:*}"
@@ -220,10 +220,11 @@ agent_phone_up() {
   for try in 1 2 3; do
     pairing="$(docker exec "$SMOKE_CORE" wonton-core pair "127.0.0.1:$((AGENT_PORT + 1))" 2>&1 | grep '^wonton://pair?' | tail -1)"
     [[ -n "$pairing" ]] || { AGENT_WHY="wonton-core pair 没给出配对链接"; return 1; }
-    docker exec "$AGENT_PHONE" tunnel-client --key /tmp/phone.key pair "$pairing" --name 'smoke phone' && break
+    docker exec "$AGENT_PHONE" tunnel-client --key /tmp/phone.key pair "$pairing" --name 'smoke phone' && { paired=1; break; }
     AGENT_WHY="手机配对被核心拒绝（试了 $try 次）"
     sleep 2
   done
+  ((paired)) || { AGENT_WHY="${AGENT_WHY:-手机配对被核心拒绝}"; return 1; }
   record="$(docker exec "$SMOKE_CORE" cat "$SMOKE_DATA_DIR/core/plugins/bots/$SMOKE_PLUGIN_ID.json")" ||
     { AGENT_WHY="核心里没有这个插件的 Bot 记录"; return 1; }
   AGENT_ROOM="$(jq -r '.bots.default.home_room // empty' <<<"$record")"
