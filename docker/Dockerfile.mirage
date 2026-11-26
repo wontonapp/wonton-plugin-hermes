@@ -3,7 +3,9 @@
 #
 # mirage-ai 装 PyPI 的 0.1.0（在兼容的构建机编好的 wheel），再把 fork 那四个纯 Python 文件盖上去：
 # 补丁只改 Python，Rust 部分没动。正式发版应由 CI 出 manylinux wheel，不靠盖文件。
-ARG BASE=nousresearch/hermes-agent@sha256:ef0650d523ee1b5ab32c779acabc446d9936869a9932591553688a62bcf0c42f
+# 共享开发机到 docker.io 经常挂，先把 base 在本地打上不带仓库的名字，buildkit 就不会去 registry 解析。
+# 正式发版改回 nousresearch/hermes-agent@sha256:ef0650d…（v0.23.4 的摘要）。
+ARG BASE=pilot-base:hermes-v0.23.4
 FROM ${BASE}
 USER root
 RUN apt-get update \
