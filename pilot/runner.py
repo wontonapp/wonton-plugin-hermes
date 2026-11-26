@@ -12,6 +12,7 @@
 
 import asyncio
 import json
+import os
 import pathlib
 import secrets
 import threading
@@ -23,7 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ASK_PORT = 8000
 ASK_TOKEN = "pilot-token"
-GATEWAY = "http://gateway-default:8642"
+# 核心生成的 compose 里 Bot 服务会改名为 <服务>-<Bot 名>；手工起容器时用环境变量指容器名。
+GATEWAY = os.environ.get("PILOT_GATEWAY", "http://gateway-default:8642")
 API_KEY = "pilot-api-key-0123456789"
 CHAT_TIMEOUT = 600
 
