@@ -25,7 +25,7 @@ ASK_PORT = 8000
 ASK_TOKEN = "pilot-token"
 GATEWAY = "http://gateway-default:8642"
 API_KEY = "pilot-api-key-0123456789"
-CHAT_TIMEOUT = 300
+CHAT_TIMEOUT = 600
 
 asked = []
 LOG = []
@@ -173,13 +173,23 @@ def wait_gateway(deadline=300):
 
 
 def chat(session_id, prompt):
-    result = http(
-        "POST",
-        f"/api/sessions/{session_id}/chat",
-        {"message": prompt},
-        timeout=CHAT_TIMEOUT,
-    )
-    return (result.get("message") or {}).get("content") or ""
+    # 试点跑批共用离线的 Magpie 网关：单条 80 秒以上、偶发 500/超时都见过。
+    # 一次失败不代表用例失败，重试三次再记账，让结果反映 Mirage 本身而不是网关抖动。
+    last = None
+    for attempt in range(3):
+        try:
+            result = http(
+                "POST",
+                f"/api/sessions/{session_id}/chat",
+                {"message": prompt},
+                timeout=CHAT_TIMEOUT,
+            )
+            return (result.get("message") or {}).get("content") or ""
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            log("chat-retry", attempt=attempt + 1, error=repr(exc))
+            time.sleep(5 * (attempt + 1))
+    raise last
 
 
 def contract_checks():
