@@ -73,7 +73,8 @@ class AskHandler(BaseHTTPRequestHandler):
             self._answer(200, {"decision": "allow", "scope": "session"})
             return
         if command == "curl":
-            if any("slow" in str(a) or str(a) == "-s" for a in argv):
+            # 两个 curl 用例靠 --max-time 区分：20 秒的故意拖 8 秒等插件超时；5 秒的立刻答。
+            if "20" in [str(a) for a in argv]:
                 log("ask-slow", command=command, seconds=8)
                 time.sleep(8)
                 try:
