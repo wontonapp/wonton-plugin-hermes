@@ -319,7 +319,8 @@ CASES = [
     ),
     (
         "ask-allow-session-curl",
-        "只执行：curl --version。把终端工具返回的原文贴出来，不要解释。",
+        "只执行：curl -s -S -o /dev/null -w '%{http_code}' --max-time 5 https://example.com/。"
+        "把终端工具返回的原文贴出来，不要解释。",
         ("",),
         [1, 0],
     ),
@@ -331,7 +332,8 @@ CASES = [
     ),
     (
         "ask-timeout-curl",
-        "只执行：curl -s --version。把终端工具返回的原文贴出来，不要解释。",
+        "只执行：curl -s -S -o /dev/null -w '%{http_code}' --max-time 20 https://example.com/。"
+        "把终端工具返回的原文贴出来，不要解释。",
         ("Permission denied", "policy denied"),
         [1],
     ),
@@ -364,7 +366,13 @@ def main():
         log("session", id=session_id, note="create failed, trying chat on this id")
     log("session", id=session_id)
 
-    # 先放好超时用例要 mv 的文件。
+    # 文件不靠模型建：模型慢或 500 时用例会连带全红。跑批容器和 Bot 共用 /opt/data。
+    work = pathlib.Path("/opt/data/work")
+    work.mkdir(parents=True, exist_ok=True)
+    for name, body in (("a.txt", "ready\n"), ("t.txt", "t\n"), ("x.env", "K=1\n")):
+        (work / name).write_text(body)
+
+    # 再让模型走一次最简单的写命令，确认终端链路活着；失败不影响后面的用例。
     chat(session_id, "只执行：echo ready > /opt/data/work/a.txt。贴终端原文，不要解释。")
 
     failures = contract_failures
