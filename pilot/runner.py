@@ -390,6 +390,8 @@ def main():
             expected_asks=ask_counts, text=text[:1200])
 
     log("summary", failures=failures, asks=len(asked), asked=asked)
+    log("idle", note="跑完不退出：核心按 healthcheck 判就绪，不用等整轮跑批超过安装时限")
+    threading.Event().wait()
     return 1 if failures else 0
 
 
@@ -401,5 +403,4 @@ if __name__ == "__main__":
         raise
     except Exception:  # noqa: BLE001
         traceback.print_exc()
-    # 一次性服务：exit 0 才算装好；失败也让安装过去，结果只落在日志和退出摘要里。
     raise SystemExit(0)

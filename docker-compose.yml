@@ -235,9 +235,9 @@ services:
   # 全插件一份的服务不能依赖 Bot 服务，所以不写 depends_on，脚本自己等 gateway-default 健康。
   pilot-runner:
     image: *image
-    restart: "no"
-    # restart: "no" 让核心把它当一次性服务：跑完必须 exit 0 才算装好（健康检查对一次性服务不参与等待）。
-    # 失败也 exit 0，否则一次跑批失败会挡住整个安装；结果看 scripts/dev.sh logs pilot-runner。
+    restart: unless-stopped
+    # 常驻服务而不是一次性任务：一次跑批要十几分钟，超过核心等一次性服务的 480 秒，安装会被判 degraded。
+    # 常驻后核心只等 healthcheck（/health 在开跑前就绪），结果看 scripts/dev.sh logs pilot-runner。
     entrypoint: ["/opt/hermes/.venv/bin/python", "-u", "/pilot/runner.py"]
     healthcheck:
       # 自己报就绪，核心的安装探针看这个；跑起来到假收件箱可用之间返回非 0。
