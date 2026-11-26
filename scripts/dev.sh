@@ -886,6 +886,21 @@ case "${1:-}" in
   mcp) mcp "${@:2}" ;;
   approve) approve "${@:2}" ;;
   smoke) WONTON_PLUGIN="$plugin_rel" "$root/scripts/smoke.sh" "${@:2}" ;;
+  dbg)
+    # 试点临时：在栈主机上看终端容器的真实配置和执行身份（不进会话）。
+    need_env
+    echo "== ids =="; id
+    t=$(docker ps -aq --filter "label=wonton.plugin=com.nousresearch.hermes" --filter "label=wonton.service=terminal" | head -n1)
+    echo "terminal=$t"
+    echo "== inspect =="; docker inspect --format 'User={{.Config.User}} Entrypoint={{json .Config.Entrypoint}} Cmd={{json .Config.Cmd}}' "$t"
+    echo "== exec default =="; docker exec "$t" id || true
+    echo "== exec root =="; docker exec -u 0 "$t" id || true
+    echo "== passwd default =="; docker exec "$t" getent passwd default || true
+    echo "== groups =="; docker exec "$t" getent group hostdocker || true
+    echo "== sock =="; docker exec "$t" ls -l /var/run/docker.sock || true
+    echo "== docker as root =="; docker exec -u 0 "$t" /usr/bin/docker version 2>&1 | head -3 || true
+    echo "== docker as default =="; docker exec "$t" /usr/bin/docker version 2>&1 | head -3 || true
+    ;;
   probes)
     # 探针套件在这里才 source：里面有的名字（如 mcp）会盖过本文件的函数，probes 自己的路不受影响。
     # shellcheck source=scripts/probes.sh

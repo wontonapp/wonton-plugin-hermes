@@ -1,0 +1,39 @@
+# 试点用的 Mirage 工作区：程序跑在 Bot 的终端容器里，文件视图从网关的 /opt/data 过 FUSE，
+# 密钥默认挡掉。/opt/data/work 是唯一可写的地方。__TERMINAL_CONTAINER__ 由 init 换成容器 ID。
+mode: EXEC
+processes: workspace
+# 只挂工作区。把 /opt/data 再整棵挂成只读会让写穿过只读的父挂载：实测 /opt/data/work 写不进。
+mounts:
+  /opt/data/work: {vfs: disk, mode: exec, config: {root: /opt/data/work}}
+machines:
+  terminal:
+    provider: docker
+    container: __TERMINAL_CONTAINER__
+    mount_type: mirage
+    captures: ["@external", "@python"]
+profiles:
+  default:
+    commands:
+      "*": allow
+      # 按命令名问。注意别写 paths：docker/mirage 传输里任何带 paths 的规则会让所有外部程序报
+      # "cannot enforce program-specific path rules"。Hermes 每条命令在 /tmp 里做的快照 mv/rm 也会问，
+      # 由 mock 直接放行。
+      rm: {decision: ask, reason: "deletes need sign-off"}
+      mv: {decision: ask, reason: "renames need sign-off"}
+      pip: {decision: ask, reason: "installs need ops"}
+      curl: {decision: ask, reason: "network fetch"}
+      wget: {decision: ask, reason: "network fetch"}
+    paths:
+      hide:
+        - /opt/data/.env
+        - /opt/data/config.yaml
+        - /opt/data/platforms/*
+        - /opt/data/plugins/*
+        - /opt/data/cache/*
+        - /opt/data/logs/*
+        - /opt/data/outbox/*
+        - /opt/data/work/*.env
+        - /opt/data/work/*.key
+        - /opt/data/work/*.pem
+        - /opt/data/work/id_*
+profile: default

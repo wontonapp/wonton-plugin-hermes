@@ -7,3 +7,6 @@ __pycache__/
 
 # 跑行为测试用的虚拟环境（uv venv .venv-test）
 /.venv-test/
+
+# 试点：本地构建的 mirage wheel
+mirage_ai-*.whl

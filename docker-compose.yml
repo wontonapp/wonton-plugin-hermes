@@ -6,7 +6,7 @@
 # 不同人的 Bot 不能共用一个容器。
 name: hermes
 
-x-image: &image nousresearch/hermes-agent:v0.23.4@sha256:ef0650d523ee1b5ab32c779acabc446d9936869a9932591553688a62bcf0c42f
+x-image: &image hermes-mirage-pilot:pilot
 
 services:
   # 每次创建容器时（安装、升级、重建）把 Wonton 的 Hermes 插件（wonton/）放进这个 Bot 的数据目录，覆盖旧版本；包里的
@@ -27,10 +27,14 @@ services:
         cp /seed/skills/wonton-help/SKILL.md /opt/data/skills/wonton-help/ &&
         { test -f /opt/data/config.yaml || cp /seed/config.yaml /opt/data/config.yaml; } &&
         /opt/hermes/.venv/bin/python /seed/init_config.py &&
-        chown -R ${PUID}:${PGID} /opt/data/skills /opt/data/plugins /opt/data/hooks/wonton-language
+        chown -R ${PUID}:${PGID} /opt/data/skills /opt/data/plugins /opt/data/hooks/wonton-language &&
+        sh /seed/init_mirage.sh
     environment:
       # 平台 extra 里的 allow_admin_from 占位符由 init 换成这个值（Hermes 不展开 extra 的 ${VAR}）。
       WONTON_MATRIX_ALLOWED_USERS: ${WONTON_MATRIX_ALLOWED_USERS:?需要主人的 Matrix 用户 ID}
+      # init 要用它改工作区属主；Bot 会话用户是镜像的 default（PUID）。
+      PUID: ${PUID}
+      PGID: ${PGID}
       # 国内 IM 渠道开关（插件设置，true/false）：init 据此在 config.yaml 里写或撤显式停用（见 init_config.py）。
       # 开关值单独注入是为了改开关时重建 init + gateway 容器，停用状态跟着走。
       FEISHU_WONTON_ENABLED: ${WONTON_SETTING_FEISHU_ENABLED:-}
@@ -40,9 +44,18 @@ services:
       WEIXIN_WONTON_ENABLED: ${WONTON_SETTING_WEIXIN_ENABLED:-}
     volumes:
       - ${WONTON_BOT_DATA}:/opt/data
+      - /var/run/docker.sock:/var/run/docker.sock
     configs:
       - source: config
         target: /seed/config.yaml
+      - source: mirage_plugin_yaml
+        target: /seed/mirage-plugin/plugin.yaml
+      - source: mirage_plugin_init
+        target: /seed/mirage-plugin/__init__.py
+      - source: mirage_workspace
+        target: /seed/mirage-workspace.yaml
+      - source: init_mirage
+        target: /seed/init_mirage.sh
       - source: wonton_manifest
         target: /seed/wonton/plugin.yaml
       - source: wonton_hooks
@@ -122,6 +135,8 @@ services:
       WEIXIN_WONTON_ENABLED: ${WONTON_SETTING_WEIXIN_ENABLED:-}
       # matrix.bot：核心代这个 Bot 登录后签发的身份，只给令牌，不给密码。
       MATRIX_HOMESERVER: ${WONTON_MATRIX_HOMESERVER}
+      # 试点：runner 在另一个容器里，API 要听所有地址（默认只听回环，只有同网络的 web 能到）。
+      API_SERVER_HOST: "0.0.0.0"
       MATRIX_USER_ID: ${WONTON_MATRIX_USER_ID}
       MATRIX_ACCESS_TOKEN: ${WONTON_MATRIX_ACCESS_TOKEN}
       # Bot 只听名单里的人；主房间是核心替主人建的私聊，定时任务结果发到这里。
@@ -143,6 +158,8 @@ services:
       - ${WONTON_BOT_DATA}:/opt/data
       # wonton__save_file 只从这里取文件：Agent 的数据目录里有密钥。
       - ${WONTON_APP_DATA}/outbox:/opt/data/outbox
+      # 试点：Mirage 的 docker 机器用 docker exec 进终端容器。
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       # Matrix 连上才算健康：用 Hermes 自己生成的本机 API 密钥查详细状态。
       test:
@@ -173,6 +190,66 @@ services:
       timeout: 10s
       start_period: 30s
       start_interval: 2s
+
+  # 试点（ADR-0125）：Bot 的终端容器。程序跑在这里，文件视图由网关上的 Mirage 服务过 FUSE 挂进来。
+  # /dev/fuse 挂 FUSE；SYS_ADMIN 只用来 mount；没有宿主目录、没有 docker socket。
+  terminal:
+    image: *image
+    restart: unless-stopped
+    # docker 套接字是 root:971 660：起容器时（root）把这个 gid 加给会话用户，`docker` 命令才读得到。
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        if [ -S /var/run/docker.sock ]; then
+          gid=$$(stat -c %g /var/run/docker.sock);
+          { groupadd -g "$$gid" hostdocker 2>/dev/null || true; };
+          for u in default hermes; do
+            { id -u "$$u" >/dev/null 2>&1 && usermod -aG hostdocker "$$u" 2>/dev/null; } || true;
+          done;
+        fi;
+        exec sleep infinity
+    # 跟网关的 hermes(1000) 不是同一个用户：终端里的 `docker` 要能读 socket，直接跑 root。
+    user: "0:0"
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    # docker-default 的 AppArmor 不让容器 mount FUSE；豁免整份 profile。
+    security_opt:
+      - apparmor:unconfined
+    mem_limit: 256m
+    pids_limit: 512
+    environment:
+      HOME: /tmp
+    volumes:
+      # 试点：外部程序由 Mirage 在容器里 `docker exec` 跑，容器里的 `docker` 命令也要这个 socket。
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: [CMD, test, -c, /dev/fuse]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+
+  # 试点跑批：假收件箱（:8000/ask）加场景脚本，跑完退出。日志走 stdout：scripts/dev.sh logs pilot-runner。
+  # 全插件一份的服务不能依赖 Bot 服务，所以不写 depends_on，脚本自己等 gateway-default 健康。
+  pilot-runner:
+    image: *image
+    restart: "no"
+    # restart: "no" 让核心把它当一次性服务：跑完必须 exit 0 才算装好（健康检查对一次性服务不参与等待）。
+    # 失败也 exit 0，否则一次跑批失败会挡住整个安装；结果看 scripts/dev.sh logs pilot-runner。
+    entrypoint: ["/opt/hermes/.venv/bin/python", "-u", "/pilot/runner.py"]
+    healthcheck:
+      # 自己报就绪，核心的安装探针看这个；跑起来到假收件箱可用之间返回非 0。
+      test: [CMD, /opt/hermes/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+    configs:
+      - source: pilot_runner
+        target: /pilot/runner.py
+      - source: pilot_contract
+        target: /pilot/contract/ask.json
 
 configs:
   config:
@@ -213,13 +290,25 @@ configs:
     file: ./wonton/locales/ja.yaml
   init_config:
     file: ./init_config.py
+  init_mirage:
+    file: ./init_mirage.sh
+  mirage_workspace:
+    file: ./mirage-workspace.yaml
+  mirage_plugin_yaml:
+    file: ./pilot/mirage-plugin/plugin.yaml
+  mirage_plugin_init:
+    file: ./pilot/mirage-plugin/__init__.py
+  pilot_runner:
+    file: ./pilot/runner.py
+  pilot_contract:
+    file: ./pilot/contract/ask.json
   wonton_help_skill:
     file: ./skills/wonton-help/SKILL.md
   dashboard_proxy:
     file: ./dashboard-nginx.conf
 
 x-wonton:
-  spec: "0.12"
+  spec: "0.17"
   id: com.nousresearch.hermes
   version: 0.8.2
   kind: agent
@@ -268,7 +357,9 @@ x-wonton:
     sso: none
   # nginx 在 gateway 的命名空间监听 8080；入口指向 default Bot 的网络目标服务。
   bots:
-    services: [init, gateway, web]
+    services: [init, gateway, web, terminal]
+  # 终端服务（ADR-0125）：核心在这个服务上兑现 /dev/fuse、SYS_ADMIN 和 docker socket。
+  terminal: { service: terminal }
   secrets:
     # Hermes 只凭令牌就自动建好交叉签名，恢复密钥只写在数据目录里；交给核心保管，数据丢了还能恢复。
     matrix_recovery_key:
@@ -297,6 +388,12 @@ x-wonton:
         required: false
   permissions:
     - matrix.bot
+    # 试点（ADR-0125）：终端容器。设备是固定的 /dev/fuse；SYS_ADMIN 只用来在容器里 mount；
+    # docker socket 只用来 docker exec 进终端容器。
+    - devices./dev/fuse
+    - cap.SYS_ADMIN
+    - security.opt
+    - docker.socket
     # 经核心的 MCP 总线用工具：装卸插件、在授权的文件夹里找文件等。
     - tools
     # 查家人的语言（wonton__user_locale）：Bot 跟好几个人说话，没有模型时的提示要按每个人自己的语言写；

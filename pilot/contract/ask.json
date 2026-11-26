@@ -1,0 +1,14 @@
+{
+  "about": "ask 回调的线上契约：假收件箱对四种 choice_id 的回答、超时、不可达、回包读不懂。runner.py 按它跑映射测试。",
+  "answers": [
+    {"name": "approve", "body": {"decision": "allow", "scope": "once"}, "expect": {"outcome": "allow", "scope": "once"}},
+    {"name": "session", "body": {"decision": "allow", "scope": "session"}, "expect": {"outcome": "allow", "scope": "session"}},
+    {"name": "deny", "body": {"decision": "deny", "note": "installs need ops"}, "expect": {"outcome": "deny", "scope": "once", "note": "installs need ops"}},
+    {"name": "deny_session", "body": {"decision": "deny", "scope": "session", "note": "never again"}, "expect": {"outcome": "deny", "scope": "session", "note": "never again"}},
+    {"name": "bad-json", "body_raw": "not json", "expect": {"outcome": "deny", "note_contains": "unreadable"}},
+    {"name": "unknown-decision", "body": {"decision": "maybe"}, "expect": {"outcome": "deny", "note_contains": "no decision"}},
+    {"name": "unknown-scope", "body": {"decision": "allow", "scope": "forever"}, "expect": {"outcome": "deny", "note_contains": "unknown scope"}}
+  ],
+  "unreachable": {"expect": {"outcome": "deny", "note_contains": "unreachable"}},
+  "timeout": {"sleep": 8, "timeout": 0.5, "expect": {"outcome": "deny", "note_contains": "did not answer"}}
+}

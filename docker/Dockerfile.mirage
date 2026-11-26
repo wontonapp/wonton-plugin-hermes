@@ -1,0 +1,22 @@
+# 试点用镜像：官方 Hermes 镜像 + Mirage 终端后端（fork 的 on_ask 补丁）和 FUSE 客户端。
+# 网关和终端容器用同一个镜像；终端容器只用到 mirage-fuse 和 fuse3。
+#
+# mirage-ai 装 PyPI 的 0.1.0（在兼容的构建机编好的 wheel），再把 fork 那四个纯 Python 文件盖上去：
+# 补丁只改 Python，Rust 部分没动。正式发版应由 CI 出 manylinux wheel，不靠盖文件。
+ARG BASE=nousresearch/hermes-agent@sha256:ef0650d523ee1b5ab32c779acabc446d9936869a9932591553688a62bcf0c42f
+FROM ${BASE}
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fuse3 \
+ && rm -rf /var/lib/apt/lists/*
+RUN /opt/hermes/.venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1 \
+ && /opt/hermes/.venv/bin/python -m pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple "mirage-ai[ssh,monty]==0.1.0"
+COPY docker/overlay/ /tmp/overlay/
+RUN site=$(/opt/hermes/.venv/bin/python -c "import mirage, os; print(os.path.dirname(mirage.__file__))") \
+ && cp /tmp/overlay/agents/hermes/*.py "$site/agents/hermes/" \
+ && cp /tmp/overlay/server/workspace_config.py "$site/server/" \
+ && rm -rf /tmp/overlay
+# 装到全局：/root 是 0700，装到 /root/.mirage 的话会话用户（非 root）找不到 mirage-fuse。
+RUN npm install -g --force @struktoai/mirage-fuse@0.1.0 \
+ && ln -sf "$(npm root -g)/@struktoai/mirage-fuse/bin/mirage-fuse" /usr/local/bin/mirage-fuse \
+ && mirage-fuse --help >/dev/null 2>&1 || true

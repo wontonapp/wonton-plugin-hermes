@@ -82,7 +82,27 @@ approvals:
 # Wonton 的 Hermes 插件（包里的 wonton/，init 服务放进数据目录）：还没选模型时直接告诉主人去插件网页的 Keys 和
 # Models 页设置，不把上游“去终端跑 hermes model”的报错发进聊天。
 plugins:
-  enabled: [wonton]
+  enabled: [wonton, mirage]
+  entries:
+    mirage:
+      settings:
+        config: /opt/data/work/workspace.yaml
+        ask_url: http://pilot-runner:8000/ask
+        ask_token: pilot-token
+        ask_timeout: 5
+
+# 试点（ADR-0125）：终端换成 Mirage 旁路容器。程序跑在 Bot 自己的终端容器里，文件视图从网关过滤后挂进去，
+# 密钥默认隐藏；profile 里标 ask 的命令先打到试点跑批的假收件箱，5 秒不回按拒绝。
+terminal:
+  backend: mirage
+  cwd: /opt/data/work
+
+# 试点用 Magpie 直连（Hermes 自带的 custom provider）：换成自己的地址和 key 即可。
+model:
+  default: group/main
+  provider: custom
+  base_url: http://192.168.0.69:3426/v1
+  api_key: "sk-magpie-key-b8152fe43b4484d2460e406d3770d82c26b2a43b744dea8a"
 
 # 工具经核心的 MCP 总线（插件规范的“工具与 MCP 总线”），地址由核心注入（WONTON_MCP_URL）。装卸插件和会改数据的
 # 工具要主人在 Wonton App 里确认，调用一直等到主人回答再加上执行的时间。主人正在操作这个插件时先停住最多 10 分钟，

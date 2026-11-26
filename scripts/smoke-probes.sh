@@ -66,6 +66,7 @@ identity_check() { # 用户的网关会话拿页面注入的 token，进到原�
 # 5400 秒是栈名额的 TTL，不是硬超时。
 EXTRA_TIMEOUT=36700
 extra_check() {
+  hermes_dbg_terminal
   hermes_check_dashboard
   agent_check_chat /version
   hermes_check_native_restart
@@ -77,6 +78,41 @@ extra_check() {
 }
 
 hermes_gateway() { running_container "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--gateway"; }
+
+# 试点临时：终端容器的真实配置和身份，只打印不判定。
+hermes_dbg_terminal() {
+  local t
+  t=$(docker ps -aq --filter "label=wonton.plugin=com.nousresearch.hermes" --filter "label=wonton.service=terminal" | head -n1)
+  echo "== dbg terminal=$t =="
+  docker inspect --format 'User={{.Config.User}} Entrypoint={{json .Config.Entrypoint}} Cmd={{json .Config.Cmd}}' "$t" 2>&1
+  echo "-- exec default --"; docker exec "$t" id 2>&1 || true
+  echo "-- exec root --"; docker exec -u 0 "$t" id 2>&1 || true
+  echo "-- default entry --"; docker exec "$t" getent passwd default 2>&1 || true
+  echo "-- hostdocker group --"; docker exec "$t" getent group hostdocker 2>&1 || true
+  echo "-- sock --"; docker exec "$t" ls -l /var/run/docker.sock 2>&1 || true
+  echo "-- docker as root --"; docker exec -u 0 "$t" /usr/bin/docker version 2>&1 | head -3 || true
+  echo "-- docker as default --"; docker exec "$t" /usr/bin/docker version 2>&1 | head -3 || true
+  local g
+  g=$(docker ps -aq --filter "label=wonton.plugin=com.nousresearch.hermes" --filter "label=wonton.service=gateway" | head -n1)
+  echo "== dbg gateway=$g =="
+  echo "-- gateway user --"; docker inspect --format 'User={{.Config.User}}' "$g" 2>&1
+  echo "-- gateway id hermes --"; docker exec -u hermes "$g" id 2>&1 || true
+  echo "-- gateway groups --"; docker exec "$g" getent group hostdocker 2>&1 || true
+  echo "-- gateway docker as hermes --"; docker exec -u hermes "$g" /usr/bin/docker version 2>&1 | head -3 || true
+  echo "-- gateway PATH resolution --"; docker exec -u hermes "$g" sh -c 'echo PATH=$PATH; command -v docker; ls -l "$(command -v docker)"; /usr/bin/docker version 2>&1 | head -2' 2>&1 || true
+  echo "-- gateway workdir docker --"; docker exec -u hermes -w /opt/data/work "$g" sh -c 'docker version 2>&1 | head -2' 2>&1 || true
+  echo "-- PATH shadowing --"; docker exec -u hermes "$g" sh -c 'for d in $(echo $PATH | tr : " "); do [ -e "$d/docker" ] && ls -ld "$d/docker"; done' 2>&1 || true
+  echo "-- find docker --"; docker exec -u hermes "$g" sh -c 'command -v -a docker' 2>&1 || true
+  echo "-- gateway runs docker exec -i TERM --"; docker exec -u hermes "$g" sh -c "cd /opt/data/work && docker exec -i $t /bin/echo hi; echo rc=\$?" 2>&1 || true
+  echo "-- gateway as root docker exec -i --"; docker exec -u 0 "$g" sh -c "docker exec -i $t /bin/echo hi2; echo rc=\$?" 2>&1 || true
+  echo "-- env -i docker --"; docker exec -u hermes "$g" sh -c 'env -i docker version 2>&1 | head -2; echo rc=$?' 2>&1 || true
+  echo "-- env -i abs docker --"; docker exec -u hermes "$g" sh -c 'env -i /usr/bin/docker version 2>&1 | head -2; echo rc=$?' 2>&1 || true
+  echo "-- missing cwd spawn --"; docker exec -u hermes -w /opt/data/work "$g" sh -c 'cd /nonexistent 2>/dev/null; docker version >/dev/null 2>&1; echo rc=$?' 2>&1 || true
+  echo "-- share gateway→terminal --"; docker exec -u hermes "$g" sh -c 'echo X > /opt/data/work/probe-share.txt; ls -l /opt/data/work/probe-share.txt' 2>&1 || true
+  echo "-- terminal sees --"; docker exec "$t" sh -c 'ls -la /opt/data/work; cat /opt/data/work/probe-share.txt 2>&1' 2>&1 || true
+  echo "-- terminal write --"; docker exec "$t" sh -c 'echo Y > /opt/data/work/probe-term.txt; ls -l /opt/data/work/probe-term.txt' 2>&1 || true
+  echo "-- gateway sees --"; docker exec -u hermes "$g" sh -c 'ls -l /opt/data/work/probe-term.txt; cat /opt/data/work/probe-term.txt 2>&1' 2>&1 || true
+}
 
 
 # 核心重启先开监听、再恢复插件：在网关容器里连续打自己那台 MCP 入口，记第一次拿到的状态和 Retry-After。
