@@ -263,10 +263,10 @@ CASES = [
     ),
     (
         "debug-docker",
-        "只执行：sh -c 'command -v docker; ls -l /usr/bin/docker; docker version; echo rc=$?'; "
-        "/usr/bin/docker version 2>&1 | head -2; ls -ld /opt/data /opt/data/work。"
+        # 终端容器故意没有 docker：socket 只给网关，终端里能拼出二进制也不能用。
+        "只执行：command -v docker >/dev/null && docker version 2>&1 | head -2 || echo NO_DOCKER。"
         "把终端工具返回的原文贴出来，不要解释。",
-        ("Client",),
+        ("NO_DOCKER", "Client"),
         [0],
     ),
     (
@@ -306,10 +306,11 @@ CASES = [
         [0],  # 观察：rm 是 Mirage 内置命令，不走 command 规则、不触发 ask
     ),
     (
-        "rule-cat",
+        "workspace-read",
+        # 内置 cat 直接读工作区文件：规则只对内置命令之外生效，这里记录“内置命令绕过规则”的事实。
         "只执行：cat /opt/data/work/workspace.yaml | head -2。把终端工具返回的原文贴出来，不要解释。",
-        ("policy denied",),
-        [0],  # 若内置命令绕过 deny 规则，这条会先 FAIL，正好记录
+        ("Mirage",),
+        [0],
     ),
     (
         "ask-deny-pip",
