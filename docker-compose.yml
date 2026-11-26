@@ -241,10 +241,13 @@ services:
     entrypoint: ["/opt/hermes/.venv/bin/python", "-u", "/pilot/runner.py"]
     healthcheck:
       # 自己报就绪，核心的安装探针看这个；跑起来到假收件箱可用之间返回非 0。
-      test: [CMD, /opt/hermes/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
-      interval: 10s
-      timeout: 5s
-      start_period: 10s
+      test: [CMD, /opt/hermes/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=8)"]
+      # 共享测试机负载很高，每次探测要新起一个 Python 进程；10 秒的探针和 3 次重试会被一次抖动打成
+      # unhealthy，而核心的安装检查一看到 unhealthy 就判失败（等不到 480 秒）。放宽到 15/10/6。
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
     configs:
       - source: pilot_runner
         target: /pilot/runner.py

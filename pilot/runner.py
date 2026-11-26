@@ -188,7 +188,7 @@ def chat(session_id, prompt):
         except Exception as exc:  # noqa: BLE001
             last = exc
             log("chat-retry", attempt=attempt + 1, error=repr(exc))
-            time.sleep(5 * (attempt + 1))
+            time.sleep(10 * (attempt + 1))
     raise last
 
 
