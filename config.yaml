@@ -82,7 +82,9 @@ approvals:
 # Wonton 的 Hermes 插件（包里的 wonton/，init 服务放进数据目录）：还没选模型时直接告诉主人去插件网页的 Keys 和
 # Models 页设置，不把上游“去终端跑 hermes model”的报错发进聊天。
 plugins:
-  enabled: [wonton, mirage]
+  # 试点：只留 mirage。Hermes 的 wonton MCP 工具和 44 个内置技能把每轮上下文抬到 1 万 token，
+  # 试点只测终端，模型又是共享的慢网关，先砍掉。
+  enabled: [mirage]
   entries:
     mirage:
       settings:
@@ -118,7 +120,7 @@ mcp_servers:
 # 主人想用 Obsidian 库：改数据目录 config.yaml 的这份名单，并把 OBSIDIAN_VAULT_PATH 指到看得见的存储。
 # init 对缺这项的已有 Bot 补同一份（见 init_config.py），主人自己写过的名单不动。
 skills:
-  disabled: [obsidian]
+  disabled: [apple-notes, apple-reminders, findmy, imessage, claude-code, codex, computer-use, hermes-agent, architecture-diagram, ascii-video, baoyu-infographic, claude-design, humanizer, manim-video, p5js, popular-web-designs, songwriting-and-ai-music, sdlc-review, email-inbox-triage, himalaya, youtube-content, obsidian, document-to-action-items, google-workspace, maps, meeting-action-items, microsoft-office, pdf, product-price-monitor, teams-meeting-pipeline, weekly-review-planning, arxiv, competitor-news-monitor, grounded-citations, xurl, codebase-inspection, dogfood, github, requesting-code-review, simplify-code, spike, systematic-debugging, test-driven-development, blocked-page-recovery, wonton-help]
 
 timeouts:
   tools:
