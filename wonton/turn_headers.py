@@ -3,6 +3,8 @@
 import contextvars
 
 
+# 工具处理器在 MCP 循环上跑，身份在处理器外面 set，包着这次调用：仍然是个 contextvar，但在
+# 每次调用自己的任务里 set，值跟着任务走，不看进程里最近是哪一轮。
 _CURRENT = contextvars.ContextVar("wonton_turn", default=None)
 
 
