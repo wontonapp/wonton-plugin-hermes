@@ -354,10 +354,10 @@ def main():
         return 1
     contract_failures = contract_checks()
 
-    # 标题是会话表里的唯一键：时间戳 + 随机串，重装/重跑后旧会话还在也不撞。
-    title = f"mirage pilot {int(time.time())}-{secrets.token_hex(3)}"
+    # 标题是会话表里的唯一键：时间戳 + 随机串。每次重试都换一个新标题，同一个标题的第二次一定撞。
     created = None
     for attempt in range(3):
+        title = f"mirage pilot {int(time.time())}-{secrets.token_hex(3)}-{attempt}"
         try:
             created = http("POST", "/api/sessions", {"title": title})
             break
@@ -366,8 +366,14 @@ def main():
             time.sleep(2)
     session_id = ((created or {}).get("session") or {}).get("id") or (created or {}).get("id")
     if not session_id:
-        session_id = "api_pilot"
-        log("session", id=session_id, note="create failed, trying chat on this id")
+        # 建不出来就借一个已有的会话，比编一个不存在的 id 好（否则 chat 全 404）。
+        try:
+            listing = http("GET", "/api/sessions")
+            rows = listing.get("sessions") or []
+            session_id = (rows[0] or {}).get("id") if rows else None
+        except Exception as exc:  # noqa: BLE001
+            log("session-list-failed", error=repr(exc))
+    session_id = session_id or "api_pilot"
     log("session", id=session_id)
 
     # 文件不靠模型建：模型慢或 500 时用例会连带全红。跑批容器和 Bot 共用 /opt/data。
