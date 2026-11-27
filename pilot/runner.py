@@ -382,7 +382,14 @@ def main():
     work = pathlib.Path("/opt/data/work")
     work.mkdir(parents=True, exist_ok=True)
     for name, body in (("a.txt", "ready\n"), ("t.txt", "t\n"), ("x.env", "K=1\n")):
-        (work / name).write_text(body)
+        f = work / name
+        f.write_text(body)
+        # 跑批容器可能是 root：FUSE 视图按宿主属主呈现，终端里的 default(1000) 要能改写。
+        try:
+            os.chmod(f, 0o666)
+            os.chown(f, 1000, 1000)
+        except OSError:
+            pass
 
     # 再让模型走一次最简单的写命令，确认终端链路活着；失败不影响后面的用例。
     chat(session_id, "只执行：echo ready > /opt/data/work/a.txt。贴终端原文，不要解释。")
