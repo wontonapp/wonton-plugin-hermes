@@ -263,10 +263,10 @@ x-wonton:
 
       CN office-IM channels (Feishu, DingTalk, WeCom, QQ bot, personal WeChat) are enabled one by one in the plugin's settings: create a bot app on the platform's console, fill in the app ID and secret, and turn the switch on. These chats live only in that IM, not in the Wonton app's chat page; personal WeChat supports direct messages only and needs a one-time scan login from a terminal on the server (steps in the plugin README). Telegram is configured on the Channels page of the Hermes web page and uses Wonton's outbound proxy.
   release_notes:
-    zh: "模型改在 App 里接：列出 Hermes 支持的服务商，填 key、登录 Nous、ChatGPT、xAI、MiniMax 订阅，选模型、测一下，都不用再打开 Hermes 的网页。默认助手叫云吞。"
-    zh-Hant: "模型改在 App 裡接：列出 Hermes 支援的服務商，填金鑰、登入 Nous、ChatGPT、xAI、MiniMax 訂閱，選模型、測一下，都不用再打開 Hermes 的網頁。預設助手叫雲吞。"
-    en: "Models are now set up in the app: Hermes's providers are listed, and entering a key, signing in to Nous, ChatGPT, xAI or MiniMax, picking a model and testing it no longer need Hermes's web page. The default assistant is called Wonton."
-    ja: "モデルはアプリで設定するようになりました。Hermes が対応するサービスが一覧され、キーの入力、Nous・ChatGPT・xAI・MiniMax へのログイン、モデルの選択とテストに Hermes の Web ページは不要です。既定のアシスタントの名前は Wonton です。"
+    zh: "模型改在 App 里接：列出 Hermes 支持的服务商，填 key、登录 Nous、ChatGPT、xAI、MiniMax 订阅，选模型、测一下，都不用再打开 Hermes 的网页。新建的默认助手叫云吞。"
+    zh-Hant: "模型改在 App 裡接：列出 Hermes 支援的服務商，填金鑰、登入 Nous、ChatGPT、xAI、MiniMax 訂閱，選模型、測一下，都不用再打開 Hermes 的網頁。新建的預設助手叫雲吞。"
+    en: "Models are now set up in the app: Hermes's providers are listed, and entering a key, signing in to Nous, ChatGPT, xAI or MiniMax, picking a model and testing it no longer need Hermes's web page. A newly created default assistant is called Wonton."
+    ja: "モデルはアプリで設定するようになりました。Hermes が対応するサービスが一覧され、キーの入力、Nous・ChatGPT・xAI・MiniMax へのログイン、モデルの選択とテストに Hermes の Web ページは不要です。新しく作る既定のアシスタントの名前は Wonton です。"
   agent:
     protocol: matrix
     # App 原生的模型页经核心执行它（每个 Bot 在自己那组的 gateway 里）。它调的是同一容器里 Hermes 控制台的接口，
