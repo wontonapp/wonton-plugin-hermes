@@ -47,6 +47,8 @@ from .texts import CHAIN_DENIED, CHAIN_LIMIT, CHAIN_LOOP, CHAIN_OTHER, CHAIN_SEL
 
 logger = logging.getLogger(__name__)
 
+turn = sys.modules[__name__]
+
 try:
     import gateway.session_context as _session_context
 except Exception:  # 上游老版本没有它：只认环境变量
@@ -95,11 +97,11 @@ _S = {
 
 
 def register(ctx):
-    _S["ctx"] = ctx
-    ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
-    ctx.register_hook("pre_llm_call", pre_llm_call)
-    ctx.register_hook("on_session_end", on_session_end)
-    ctx.register_hook("on_session_reset", on_session_reset)
+    turn._S["ctx"] = ctx
+    ctx.register_hook("pre_gateway_dispatch", turn.pre_gateway_dispatch)
+    ctx.register_hook("pre_llm_call", turn.pre_llm_call)
+    ctx.register_hook("on_session_end", turn.on_session_end)
+    ctx.register_hook("on_session_reset", turn.on_session_reset)
 
 
 def _core():
@@ -132,35 +134,35 @@ def _session_var(name):
 
 
 def _session_id():
-    return _session_var("HERMES_SESSION_ID")
+    return turn._session_var("HERMES_SESSION_ID")
 
 
 def _runner():
-    if _S["runner"] is not None:
-        return _S["runner"]
+    if turn._S["runner"] is not None:
+        return turn._S["runner"]
     try:
         from gateway.run import _gateway_runner_ref
 
-        _S["runner"] = _gateway_runner_ref()
+        turn._S["runner"] = _gateway_runner_ref()
     except Exception as exc:
-        logger.warning("拿不到网关：%r", exc)
-    return _S["runner"]
+        turn.logger.warning("拿不到网关：%r", exc)
+    return turn._S["runner"]
 
 
 def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
     """记下这一轮的来源和会话键；第一条消息时起出箱轮询。"""
     try:
-        _S["loop"] = asyncio.get_running_loop()
+        turn._S["loop"] = asyncio.get_running_loop()
     except RuntimeError:
         pass
-    _install_headers()
+    turn._install_headers()
     if session_store is not None:
-        _S["session_store"] = session_store
+        turn._S["session_store"] = session_store
     if gateway is not None:
-        _S["gateway"] = gateway
+        turn._S["gateway"] = gateway
     source = getattr(event, "source", None)
     room = getattr(source, "chat_id", None)
-    if room is None or not _is_matrix(getattr(source, "platform", None)):
+    if room is None or not turn._is_matrix(getattr(source, "platform", None)):
         return None
     sender = getattr(source, "user_id", None)
     if not sender:
@@ -172,7 +174,7 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
             session_key = session_store._generate_session_key(source)
             sid = session_store.peek_session_id(session_key)
         except Exception as exc:
-            logger.debug("算会话键失败：%r", exc)
+            turn.logger.debug("算会话键失败：%r", exc)
     found = {
         "sender": sender,
         "source": source,
@@ -182,40 +184,40 @@ def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
         "event_id": getattr(event, "message_id", None) or getattr(event, "id", None),
     }
     if sid:
-        _S["origins"][sid] = found
-        _S["dispatched"].setdefault(sid, {})[sender] = found
-        _S["reported"].discard(sid)
+        turn._S["origins"][sid] = found
+        turn._S["dispatched"].setdefault(sid, {})[sender] = found
+        turn._S["reported"].discard(sid)
     if session_key:
-        _S["pending"][session_key] = found
-    _start_worker()
+        turn._S["pending"][session_key] = found
+    turn._start_worker()
     return None
 
 
 def _origin(session_id):
-    found = _S["origins"].get(session_id)
+    found = turn._S["origins"].get(session_id)
     if found is not None:
         # 同一条会话的下一句：记在 pending 里的是这一句的消息和来源，盖掉上一轮的
         # （被打断或重置以后 peek 不到会话 id，pre_gateway_dispatch 只写 pending）。
-        fresh = _S["pending"].pop(found.get("session_key"), None)
+        fresh = turn._S["pending"].pop(found.get("session_key"), None)
         if fresh is not None:
             found.update(fresh)
         return found
-    store = _S["session_store"]
+    store = turn._S["session_store"]
     if store is None or not session_id:
         return None
     try:
         entry = store.lookup_by_session_id(session_id)
     except Exception as exc:
-        logger.debug("查会话来源失败 %s：%r", session_id, exc)
+        turn.logger.debug("查会话来源失败 %s：%r", session_id, exc)
         return None
     origin = getattr(entry, "origin", None) if entry else None
-    if origin is None or not _is_matrix(getattr(origin, "platform", None)):
+    if origin is None or not turn._is_matrix(getattr(origin, "platform", None)):
         return None
     try:
         session_key = store._generate_session_key(origin)
     except Exception:
         session_key = None
-    found = _S["pending"].pop(session_key, None) or {}
+    found = turn._S["pending"].pop(session_key, None) or {}
     found.update({
         "sender": getattr(origin, "user_id", None),
         "session_key": session_key,
@@ -223,7 +225,7 @@ def _origin(session_id):
         "thread": getattr(origin, "thread_id", None) or None,
     })
     found.setdefault("event_id", None)
-    _S["origins"][session_id] = found
+    turn._S["origins"][session_id] = found
     return found
 
 
@@ -236,10 +238,10 @@ def _identity(session_id):
     会话结束以后迟到的调用只剩会话号这一支：核心对已结束的会话没有在跑的轮，会退到“封顶最严的轮”，
     这条会话再开新链之前可能拿到别的说话人，和完全不带会话头一样，不是准的。
     """
-    active = _S["active"].get(session_id)
+    active = turn._S["active"].get(session_id)
     if active is not None:
         return active, "会话环境"
-    origin = _S["origins"].get(session_id)
+    origin = turn._S["origins"].get(session_id)
     if origin is not None:
         return {
             "sender": origin.get("sender"),
@@ -255,23 +257,23 @@ def _identity(session_id):
 def note_page():
     """网页控制台连上来了：出箱轮询和 MCP 头只有网关的入站消息会带上，网页不经过它。"""
     try:
-        _S["loop"] = asyncio.get_running_loop()
+        turn._S["loop"] = asyncio.get_running_loop()
     except RuntimeError:
         pass
-    _install_headers()
-    _start_worker()
+    turn._install_headers()
+    turn._start_worker()
 
 
 def attach_gateway(server):
     """记下上游的会话表模块：网页连接关了要按它认人。网关本身在 ``_S["gateway"]``，两回事。"""
-    _S["server"] = server
+    turn._S["server"] = server
 
 
 def note_peer(session_id, transport):
     """这条连接刚提交（或恢复）了这条会话。谁都记：终端页签最后提交时不该让早先的网页顶上。"""
     if session_id:
-        _S["webs"][session_id] = transport
-    _pages().remember(session_id, transport)
+        turn._S["webs"][session_id] = transport
+    turn._pages().remember(session_id, transport)
 
 
 def _pages():
@@ -282,15 +284,15 @@ def _pages():
 
 def _page_user(transport):
     """这条连接带的打开者；不是网页连接时 None。"""
-    return _pages().opener_of(transport)
+    return turn._pages().opener_of(transport)
 
 
 def _warn_pages(session_id, reason):
     """上游形状变了按会话各报一次：同一进程里另一个会话的形状变化还得能看见。"""
-    if session_id in _S["page_warned"]:
+    if session_id in turn._S["page_warned"]:
         return None
-    _S["page_warned"].add(session_id)
-    logger.warning("%s，网页连接认不出人（会话 %s）", reason, session_id)
+    turn._S["page_warned"].add(session_id)
+    turn.logger.warning("%s，网页连接认不出人（会话 %s）", reason, session_id)
     return None
 
 
@@ -302,33 +304,33 @@ def _page_sender(session_id):
     提交的那条说；没有会话表或一个活连接都没有才退回记录本身。一个带打开者的都没有就不算人，交回上游的
     ``sender_id``。网页会话没有 Matrix 来源，``pre_gateway_dispatch`` 不来；按轮现取，不缓存到会话。
     """
-    recorded = _pages().recorded(session_id)
-    server = _S["server"]
+    recorded = turn._pages().recorded(session_id)
+    server = turn._S["server"]
     live = None
     if server is None:
         # 没有控制台的进程（定时任务、旧版环境）是常态，不当事故报。
-        logger.debug("没有上游的会话表，网页连接认不出人（会话 %s）", session_id)
+        turn.logger.debug("没有上游的会话表，网页连接认不出人（会话 %s）", session_id)
     else:
         try:
             live = server._session_live_transports(server._sessions.get(session_id))
         except AttributeError as exc:
-            _warn_pages(session_id, f"上游的会话表换了形状：{exc!r}")
-    remembered = _S["webs"].get(session_id)
+            turn._warn_pages(session_id, f"上游的会话表换了形状：{exc!r}")
+    remembered = turn._S["webs"].get(session_id)
     # 记下的连接已经不在会话里了（上游拆 Fanout 时子连接的 ``_closed`` 不置位，光看标记发现不了）：记录
     # 就是它的话已经过时，改由还剩的活连接里最后提交的那条说。别的控制台进程里刚打完字的记录本进程
     # 不认识它的连接，照旧信记录。
     stale = (remembered is not None and live is not None
              and not any(peer is remembered for peer in live)
-             and (recorded is None or _page_user(remembered) == recorded.strip()))
+             and (recorded is None or turn._page_user(remembered) == recorded.strip()))
     if live and stale:
         for transport in reversed(live):
-            sender = _page_user(transport)
+            sender = turn._page_user(transport)
             if sender:
                 return sender
     if recorded is not None:
         return recorded.strip() or None
     if remembered is not None:
-        return _page_user(remembered)
+        return turn._page_user(remembered)
     return None
 
 
@@ -338,30 +340,30 @@ def _cron_execution():
     先问插件上下文；委派出去的子代理里上游特意让它返回 None（``cron/execution_identity.py``），
     这时退回读上游自己那份执行标记：子代理跑在委派时拷来的 context 里，标记还在，它替同一件事干活。
     """
-    ctx = _S["ctx"]
+    ctx = turn._S["ctx"]
     execution = ctx.current_cron_execution() if ctx is not None else None
     if execution is not None:
         return execution
     try:
-        from cron.execution_identity import _CURRENT
+        from cron.execution_identity import _CURRENT as _UPSTREAM_CURRENT
 
-        return _CURRENT.get()
+        return _UPSTREAM_CURRENT.get()
     except Exception as exc:
-        if not _S["warned_marker"]:
-            _S["warned_marker"] = True
-            logger.warning("拿不到上游的定时任务执行标记，子代理那条身份会失去：%r", exc)
+        if not turn._S["warned_marker"]:
+            turn._S["warned_marker"] = True
+            turn.logger.warning("拿不到上游的定时任务执行标记，子代理那条身份会失去：%r", exc)
         return None
 
 
 def _warn_cron(job_id, origin, reason):
     """同一个任务的同一份 origin 只提醒一次：主人改了任务的 origin 会再提醒一次。"""
     key = repr(origin)
-    if _S["cron_warned"].get(job_id) == key:
+    if turn._S["cron_warned"].get(job_id) == key:
         return
-    if len(_S["cron_warned"]) > 256:
-        _S["cron_warned"].clear()
-    _S["cron_warned"][job_id] = key
-    logger.warning("定时任务 %s 的 origin 用不上（%s），调用不带身份", job_id, reason)
+    if len(turn._S["cron_warned"]) > 256:
+        turn._S["cron_warned"].clear()
+    turn._S["cron_warned"][job_id] = key
+    turn.logger.warning("定时任务 %s 的 origin 用不上（%s），调用不带身份", job_id, reason)
 
 
 def _cron_identity(execution):
@@ -379,11 +381,11 @@ def _cron_identity(execution):
     """
     job_id = getattr(execution, "job_id", None)
     if not job_id:
-        _warn_cron("", None, "执行里没有任务 id")
+        turn._warn_cron("", None, "执行里没有任务 id")
         return None
     # 一次执行里 origin 不会变；主人改了任务，下一次执行的执行号不同，会重新读。
-    cache_key = _cron_key(job_id, execution)
-    cache = _S["cron_origins"]
+    cache_key = turn._cron_key(job_id, execution)
+    cache = turn._S["cron_origins"]
     if cache_key in cache:
         identity = cache[cache_key]
         return dict(identity) if identity else None
@@ -393,18 +395,18 @@ def _cron_identity(execution):
         job = get_job(job_id)
     except Exception as exc:
         # 读盘失败可能是暂时的，不记住，下一次调用再试。
-        _warn_cron(job_id, None, f"读任务失败 {exc!r}")
+        turn._warn_cron(job_id, None, f"读任务失败 {exc!r}")
         return None
     origin = (job or {}).get("origin") or {}
     sender = origin.get("user_id")
     if job is None:
-        _warn_cron(job_id, origin, "任务没了，不带身份（核心按只读算）")
+        turn._warn_cron(job_id, origin, "任务没了，不带身份（核心按只读算）")
         identity = None
     elif origin.get("platform") != "matrix":
-        _warn_cron(job_id, origin, f"建任务的平台是 {origin.get('platform')!r}，不带身份（核心按只读算）")
+        turn._warn_cron(job_id, origin, f"建任务的平台是 {origin.get('platform')!r}，不带身份（核心按只读算）")
         identity = None
     elif not sender:
-        _warn_cron(job_id, origin, "origin 里没有创建者，不带身份（核心按只读算）")
+        turn._warn_cron(job_id, origin, "origin 里没有创建者，不带身份（核心按只读算）")
         identity = None
     else:
         identity = {"sender": sender, "room": origin.get("chat_id"), "thread": origin.get("thread_id")}
@@ -424,10 +426,10 @@ async def _cron_identity_async(execution):
 
     `get_job` 是同步的，会把整份 ``jobs.json`` 读出来解一遍；在事件循环里直接调用会挡住别的会话。
     """
-    identity = _S["cron_origins"].get(_cron_key(getattr(execution, "job_id", None), execution), ())
+    identity = turn._S["cron_origins"].get(turn._cron_key(getattr(execution, "job_id", None), execution), ())
     if identity != ():
         return dict(identity) if identity else None
-    return await asyncio.to_thread(_cron_identity, execution)
+    return await asyncio.to_thread(turn._cron_identity, execution)
 
 
 def _refresh_tools():
@@ -446,13 +448,13 @@ def _refresh_tools():
     errors = []
     for server_task in tasks:
         try:
-            _run_on_mcp_loop(lambda task=server_task: task._refresh_tools(), timeout=REFRESH_TIMEOUT)
+            _run_on_mcp_loop(lambda task=server_task: task._refresh_tools(), timeout=turn.REFRESH_TIMEOUT)
         except Exception as exc:
             errors.append(exc)
     if len(errors) == len(tasks):
         raise errors[0]
     for error in errors:
-        logger.warning("有一个 MCP 服务的清单没重取上：%r", error)
+        turn.logger.warning("有一个 MCP 服务的清单没重取上：%r", error)
     return True
 
 
@@ -480,10 +482,10 @@ def _agent_for_turn(session_id):
         if agent is not None and getattr(agent, "session_id", None) == session_id:
             return agent
         frame = frame.f_back
-    cache = getattr(_S["gateway"], "_agent_cache", None)
+    cache = getattr(turn._S["gateway"], "_agent_cache", None)
     if not cache:
         return None
-    lock = getattr(_S["gateway"], "_agent_cache_lock", None)
+    lock = getattr(turn._S["gateway"], "_agent_cache_lock", None)
     with (lock or contextlib.suppress()):
         for entry in list(cache.values()):
             agent = entry[0] if isinstance(entry, tuple) else entry
@@ -499,36 +501,36 @@ def _remember_for_listing(session_id, sender):
     清单只在连接、重连时取一次，挂着不动的连接会一直用连接那一刻的帽子。模型调用之前按这一轮的身份重取
     一遍，模型这一轮才看得见他买得起的工具。同一个说话人不重取。
     """
-    execution = _cron_execution()
+    execution = turn._cron_execution()
     if execution is not None:
-        identity = _cron_identity(execution)
+        identity = turn._cron_identity(execution)
     elif sender:
         identity = {"sender": sender, "session": session_id, "room": None, "thread": None}
     else:
         identity = None
-    _S["last"] = identity
-    if identity is None or identity["sender"] == _S["listed"]:
+    turn._S["last"] = identity
+    if identity is None or identity["sender"] == turn._S["listed"]:
         return
     try:
-        refreshed = _refresh_tools()
+        refreshed = turn._refresh_tools()
     except Exception as exc:
-        logger.warning("按 %s 重取工具清单失败，这一轮按旧清单走：%r", identity["sender"], exc)
+        turn.logger.warning("按 %s 重取工具清单失败，这一轮按旧清单走：%r", identity["sender"], exc)
         return
     if not refreshed:
         return
-    if _S["last"] is not identity:
+    if turn._S["last"] is not identity:
         return  # 重取期间这一轮已经换人或没了，别把旧身份记成已取
-    _S["listed"] = identity["sender"]
-    agent = _agent_for_turn(session_id)
+    turn._S["listed"] = identity["sender"]
+    agent = turn._agent_for_turn(session_id)
     if agent is None:
         return
     try:
-        added = _refresh_agent_tools(agent)
+        added = turn._refresh_agent_tools(agent)
     except Exception as exc:
-        logger.warning("把重取到的清单交给这一轮失败：%r", exc)
+        turn.logger.warning("把重取到的清单交给这一轮失败：%r", exc)
         return
     if added:
-        logger.warning("按 %s 重取后清单多了：%s", identity["sender"], ", ".join(sorted(added)))
+        turn.logger.warning("按 %s 重取后清单多了：%s", identity["sender"], ", ".join(sorted(added)))
 
 
 def _claim_dispatch(session_id, sender_id):
@@ -540,39 +542,39 @@ def _claim_dispatch(session_id, sender_id):
     """
     if not sender_id:
         return None
-    waiting = _S["dispatched"].get(session_id)
+    waiting = turn._S["dispatched"].get(session_id)
     if not waiting:
         return None
     found = waiting.pop(sender_id, None)
     if found is None:
         return None
     if not waiting:
-        _S["dispatched"].pop(session_id, None)
+        turn._S["dispatched"].pop(session_id, None)
     # 这个人自己那条消息要另报一次：派发进来的下一轮可能赶在上一条还能跑的时候到，``reported`` 会挡住它。
-    _S["reported"].discard(session_id)
+    turn._S["reported"].discard(session_id)
     return found
 
 
 def pre_llm_call(session_id="", sender_id="", **_):
     """报链开始；被拒时用这条原因结束这一轮。一条消息只报一次。"""
     # 定时任务没有网关消息，pre_gateway_dispatch 不会来，只靠这里把工具处理器包上。
-    _install_headers()
+    turn._install_headers()
     # 网关派发的这一轮（IM 消息）按 IM 的人、房间和事件号算：网页开着这条会话时，开页的人也不能顶掉它。
     # 标记按会话号挂在说话人名下，对上的人才认领（控制台是 ``cloud-gateway``，App 页签是 ``uid:<n>``）。
-    dispatched = _claim_dispatch(session_id, sender_id)
+    dispatched = turn._claim_dispatch(session_id, sender_id)
     if dispatched is not None:
-        _S["origins"][session_id] = dispatched
+        turn._S["origins"][session_id] = dispatched
         origin = dispatched
     else:
-        origin = _origin(session_id) or {}
-    page = None if dispatched is not None else _page_sender(session_id)
+        origin = turn._origin(session_id) or {}
+    page = None if dispatched is not None else turn._page_sender(session_id)
     if page is not None:
         # 网页轮不带房间和事件号：房间只对 IM 来的那一轮有意义。认不出开页的人（只读连接、没有记录）时
         # 留着来源，和认不出派发标记时一样按 IM 兜底。
         origin = {}
     sender = page or sender_id or origin.get("sender")
-    _remember_for_listing(session_id, sender)
-    if not sender or session_id in _S["reported"]:
+    turn._remember_for_listing(session_id, sender)
+    if not sender or session_id in turn._S["reported"]:
         return None
     if page is None and not origin.get("room"):
         return None
@@ -585,45 +587,45 @@ def pre_llm_call(session_id="", sender_id="", **_):
     }
     if origin.get("thread"):
         body["thread"] = origin["thread"]
-    verdict, refusal, detail = _chain_start(body)
+    verdict, refusal, detail = turn._chain_start(body)
     if verdict == "stopped":
         # 报到的链已经停了（唤醒标签还指着它，常见于主人刚按下停止）：去掉消息 id 再报一次，
         # 核心就按会话新开一条链。停了的链本来也不接新消息，叫回同样开新链。
         body["event_id"] = ""
-        verdict, refusal, detail = _chain_start(body)
+        verdict, refusal, detail = turn._chain_start(body)
     if verdict == "retry":
         if dispatched is not None:
             # 下一次模型调用还按这条 IM 算。
-            _S["dispatched"].setdefault(session_id, {})[sender] = dispatched
+            turn._S["dispatched"].setdefault(session_id, {})[sender] = dispatched
         return None
-    _S["reported"].add(session_id)
+    turn._S["reported"].add(session_id)
     if verdict == "grant":
-        _S["active"][session_id] = {
+        turn._S["active"][session_id] = {
             "sender": sender,
             "session": session_id,
             "room": origin.get("room"),
             "thread": origin.get("thread"),
         }
-        _S["ending"].add(session_id)
+        turn._S["ending"].add(session_id)
         return None
     if verdict == "stopped":
-        return {"action": "block", "message": CHAIN_STOPPED[_language(sender)]}
+        return {"action": "block", "message": CHAIN_STOPPED[turn._language(sender)]}
     # 其他拒绝：链没开成，也要报 End，让核心把这轮放掉。
-    _S["ending"].add(session_id)
-    logger.info("核心不收这一轮（%r）：%s", refusal, detail)
-    return {"action": "block", "message": _refusal_text(refusal, sender, detail)}
+    turn._S["ending"].add(session_id)
+    turn.logger.info("核心不收这一轮（%r）：%s", refusal, detail)
+    return {"action": "block", "message": turn._refusal_text(refusal, sender, detail)}
 
 
 def _language(sender):
     """说话人的语言；问不到时英文。钩子跑在单独的线程里，那里没有事件循环。"""
-    coro = language(sender)
+    coro = turn.language(sender)
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         try:
             return asyncio.run(coro)
         except Exception as exc:
-            logger.debug("取语言失败，按英文回：%r", exc)
+            turn.logger.debug("取语言失败，按英文回：%r", exc)
             return "en"
     # 调用线程里已经有事件循环（钩子改成在循环里跑也照常）：借一次性线程跑完再等。
     box = {}
@@ -638,7 +640,7 @@ def _language(sender):
     thread.start()
     thread.join()
     if "error" in box:
-        logger.debug("取语言失败，按英文回：%r", box["error"])
+        turn.logger.debug("取语言失败，按英文回：%r", box["error"])
         return "en"
     return box["lang"]
 
@@ -650,7 +652,7 @@ def _refusal_text(refusal, sender, detail=""):
     会话挂在别的链上、卡片已登记这类核心错误走的是 ``other``，类型分类只在响应头 ``x-wonton-error``
     里，插件只读响应体，所以落到下面泛泛的那句。
     """
-    lang = _language(sender)
+    lang = turn._language(sender)
     kind = refusal.get("type")
     if kind == "permission_denied":
         text = CHAIN_DENIED[lang]
@@ -667,27 +669,27 @@ def _refusal_text(refusal, sender, detail=""):
 
 def on_session_reset(session_id=None, old_session_id=None, **_):
     """会话被重置（``/new`` 等）：旧会话的网页记录和派发标记没人再读，删掉。"""
-    _S["dispatched"].pop(old_session_id or session_id, None)
-    _pages().forget(old_session_id or session_id)
+    turn._S["dispatched"].pop(old_session_id or session_id, None)
+    turn._pages().forget(old_session_id or session_id)
 
 
 def on_session_end(session_id="", **_):
     """这一轮结束：清身份，报过的链报结束。"""
-    if _S["ending"] and session_id not in _S["ending"]:
-        logger.warning("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(_S["ending"]))
-    _S["active"].pop(session_id, None)
-    _S["webs"].pop(session_id, None)
-    _S["page_warned"].discard(session_id)
+    if turn._S["ending"] and session_id not in turn._S["ending"]:
+        turn.logger.warning("一轮结束报不回去 session=%s，手里还留着 %r", session_id, sorted(turn._S["ending"]))
+    turn._S["active"].pop(session_id, None)
+    turn._S["webs"].pop(session_id, None)
+    turn._S["page_warned"].discard(session_id)
     # 派发标记不清：先结束的这一轮（常是网页轮）不能把还没跑的 IM 那一轮吃掉，只有重置才清。
-    _pages().forget(session_id)
-    _S["unknown"].discard(session_id)
-    _S["unknown"].discard("")
-    _S["reported"].discard(session_id)
-    origin = _S["origins"].pop(session_id, None) or {}
-    _S["pending"].pop(origin.get("session_key"), None)
-    if session_id in _S["ending"]:
-        _S["ending"].discard(session_id)
-        _post_chain({"phase": "end", "session": session_id})
+    turn._pages().forget(session_id)
+    turn._S["unknown"].discard(session_id)
+    turn._S["unknown"].discard("")
+    turn._S["reported"].discard(session_id)
+    origin = turn._S["origins"].pop(session_id, None) or {}
+    turn._S["pending"].pop(origin.get("session_key"), None)
+    if session_id in turn._S["ending"]:
+        turn._S["ending"].discard(session_id)
+        turn._post_chain({"phase": "end", "session": session_id})
 
 
 def _chain_start(body):
@@ -695,15 +697,15 @@ def _chain_start(body):
 
     结论是 ``grant``（准了）、``stopped``、``refused``，或者 ``retry``（没拿到准信，下一次模型调用再报）。
     """
-    core, token = _core()
-    bot = _bot_token()
+    core, token = turn._core()
+    bot = turn._bot_token()
     if not core or not token or not bot:
         return "retry", {}, ""
     try:
-        response = httpx.post(f"{core}/agent/chains/{token}", json=body,
-                              headers={BOT_TOKEN: bot}, timeout=START_TIMEOUT, trust_env=False)
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("报链开始失败，下一次模型调用再报：%r", exc)
+        response = turn.httpx.post(f"{core}/agent/chains/{token}", json=body,
+                              headers={turn.BOT_TOKEN: bot}, timeout=turn.START_TIMEOUT, trust_env=False)
+    except (turn.httpx.HTTPError, ValueError) as exc:
+        turn.logger.warning("报链开始失败，下一次模型调用再报：%r", exc)
         return "retry", {}, ""
     detail = response.headers.get("X-Wonton-Detail", "")
     if response.is_success:
@@ -713,26 +715,26 @@ def _chain_start(body):
     except ValueError:
         refusal = None
     if not isinstance(refusal, dict) or not refusal.get("type"):
-        logger.warning("报链开始被拒（%s），原因没认出来：%s", response.status_code, detail)
+        turn.logger.warning("报链开始被拒（%s），原因没认出来：%s", response.status_code, detail)
         return "retry", {}, detail
     return ("stopped" if refusal["type"] == "stopped" else "refused"), refusal, detail
 
 
 def _post_chain(body):
     """排队 POST 一轮的结束；失败只记日志。"""
-    core, token = _core()
-    bot = _bot_token()
+    core, token = turn._core()
+    bot = turn._bot_token()
     if not core or not token or not bot:
         return
-    _CHAIN_POSTS.submit(_chain_request, f"{core}/agent/chains/{token}", body, bot)
+    turn._CHAIN_POSTS.submit(turn._chain_request, f"{core}/agent/chains/{token}", body, bot)
 
 
 def _chain_request(url, body, bot):
     try:
-        response = httpx.post(url, json=body, headers={BOT_TOKEN: bot}, timeout=START_TIMEOUT, trust_env=False)
+        response = turn.httpx.post(url, json=body, headers={turn.BOT_TOKEN: bot}, timeout=turn.START_TIMEOUT, trust_env=False)
         response.raise_for_status()
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("报调用链 %s 失败：%r", body.get("phase"), exc)
+    except (turn.httpx.HTTPError, ValueError) as exc:
+        turn.logger.warning("报调用链 %s 失败：%r", body.get("phase"), exc)
 
 
 def _install_headers():
@@ -740,57 +742,57 @@ def _install_headers():
 
     插件注册时 Hermes 还没导 ``tools.mcp_tool_handlers``，第一条消息到时再包；包过以后这里是空的。
     """
-    _wrap_list_tools()
+    turn._wrap_list_tools()
     try:
         from tools import mcp_tool_handlers
     except Exception as exc:
-        logger.debug("包 MCP 工具处理器失败：%r", exc)
+        turn.logger.debug("包 MCP 工具处理器失败：%r", exc)
         return
     try:
         original = mcp_tool_handlers._call_tool_racing_stdio_death
     except AttributeError as exc:
-        if not _S["warned"]:
-            _S["warned"] = True
-            logger.warning("上游没有 MCP 工具处理器 hook 点，身份头不会带上：%r", exc)
+        if not turn._S["warned"]:
+            turn._S["warned"] = True
+            turn.logger.warning("上游没有 MCP 工具处理器 hook 点，身份头不会带上：%r", exc)
         return
     if getattr(original, "_wonton_turn", False):
         return
 
     async def call(server, *args, **kwargs):
-        env = _session_id()
-        turn, source = _identity(env)
-        logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
-        execution = _cron_execution()
-        cron = await _cron_identity_async(execution) if execution is not None else None
+        env = turn._session_id()
+        who, source = turn._identity(env)
+        turn.logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, who)
+        execution = turn._cron_execution()
+        cron = await turn._cron_identity_async(execution) if execution is not None else None
         if cron is not None:
-            turn, source = cron, "定时任务"
-            _S["last"] = turn
-            logger.debug("MCP 调用来自定时任务：替创建者 %s 说话，不带会话", turn["sender"])
-        elif execution is not None and turn is not None:
+            who, source = cron, "定时任务"
+            turn._S["last"] = who
+            turn.logger.debug("MCP 调用来自定时任务：替创建者 %s 说话，不带会话", who["sender"])
+        elif execution is not None and who is not None:
             # 定时任务的会话号核心认不出，别拿它去猜别的轮。
-            turn = {**turn, "session": None}
-        if turn is None:
+            who = {**who, "session": None}
+        if who is None:
             if source != "轮次":
-                logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, turn)
-            if env not in _S["unknown"]:
-                _S["unknown"].add(env)
+                turn.logger.debug("MCP 调用的身份取自%s：环境的会话 %r，带的 %r", source, env, who)
+            if env not in turn._S["unknown"]:
+                turn._S["unknown"].add(env)
                 if env:
-                    logger.warning("这一轮的身份取不到（环境的会话 %r）：调用不带代表头和会话", env)
+                    turn.logger.warning("这一轮的身份取不到（环境的会话 %r）：调用不带代表头和会话", env)
                 else:
-                    logger.warning("这一轮没有会话号，身份取不到：调用不带代表头和会话")
+                    turn.logger.warning("这一轮没有会话号，身份取不到：调用不带代表头和会话")
             # 明确压一个空身份：别让盖章退回去拿上一轮的 last 猜这次调用。
-            token = _CURRENT.set({})
+            token = turn._CURRENT.set({})
             try:
                 return await original(server, *args, **kwargs)
             finally:
-                _CURRENT.reset(token)
-        _S["last"] = turn
-        _patch_session(server.session)
-        token = _CURRENT.set(turn)
+                turn._CURRENT.reset(token)
+        turn._S["last"] = who
+        turn._patch_session(server.session)
+        token = turn._CURRENT.set(who)
         try:
             return await original(server, *args, **kwargs)
         finally:
-            _CURRENT.reset(token)
+            turn._CURRENT.reset(token)
 
     call._wonton_turn = True
     mcp_tool_handlers._call_tool_racing_stdio_death = call
@@ -806,16 +808,16 @@ def _wrap_list_tools():
     try:
         from mcp.client.session import ClientSession
     except Exception as exc:
-        if not _S["warned_list"]:
-            _S["warned_list"] = True
-            logger.warning("上游没有会话的 ``list_tools`` 可包，清单不会带身份：%r", exc)
+        if not turn._S["warned_list"]:
+            turn._S["warned_list"] = True
+            turn.logger.warning("上游没有会话的 ``list_tools`` 可包，清单不会带身份：%r", exc)
         return
     if getattr(ClientSession.list_tools, "_wonton_list", False):
         return
     original = ClientSession.list_tools
 
     async def list_tools(self, *args, **kwargs):
-        _patch_session(self)
+        turn._patch_session(self)
         return await original(self, *args, **kwargs)
 
     list_tools._wonton_list = True
@@ -837,16 +839,16 @@ def _stamp_turn(session):
 
     def with_turn(data, opts):
         stamp(data, opts)
-        turn = _CURRENT.get()
-        if turn is None:
-            turn = _S["last"]
-        if not turn:
+        who = turn._CURRENT.get()
+        if who is None:
+            who = turn._S["last"]
+        if not who:
             return
         headers = opts.setdefault("headers", {})
-        if turn.get("sender"):
-            headers[ON_BEHALF_OF] = turn["sender"]
-        if turn.get("session"):
-            headers[SESSION] = turn["session"]
+        if who.get("sender"):
+            headers[turn.ON_BEHALF_OF] = who["sender"]
+        if who.get("session"):
+            headers[turn.SESSION] = who["session"]
 
     with_turn._wonton_stamp = True
     session._stamp = with_turn
@@ -856,23 +858,23 @@ def _patch_session(session):
     if getattr(session, "_wonton_turn", False):
         return
     session._wonton_turn = True
-    _stamp_turn(session)
+    turn._stamp_turn(session)
     original_adopt = session.adopt
 
     def adopt(result):
         original_adopt(result)
-        _stamp_turn(session)
+        turn._stamp_turn(session)
 
     session.adopt = adopt
     original_call = session.call_tool
 
     async def call_tool(name, arguments=None, *args, **kwargs):
-        turn = _CURRENT.get()
-        if turn and "meta" not in kwargs:
-            origin = {name: turn[key] for key, name in (("room", "room_id"), ("thread", "thread_id")) if turn.get(key)}
+        who = turn._CURRENT.get()
+        if who and "meta" not in kwargs:
+            origin = {name: who[key] for key, name in (("room", "room_id"), ("thread", "thread_id")) if who.get(key)}
             if origin:
                 # 核心的 origin 要求 room_id；只有会话号时塞空的 {} 反而解析不了，不带。
-                kwargs["meta"] = {ORIGIN: origin}
+                kwargs["meta"] = {turn.ORIGIN: origin}
         return await original_call(name, arguments, *args, **kwargs)
 
     session.call_tool = call_tool
@@ -880,25 +882,25 @@ def _patch_session(session):
 
 def _start_worker():
     """起后台的出箱轮询；任务留在 ``_S`` 里，事件循环只对任务持弱引用。"""
-    loop = _S["loop"]
-    worker = _S["worker"]
+    loop = turn._S["loop"]
+    worker = turn._S["worker"]
     if worker and (not hasattr(worker, "done") or not worker.done()):
         return
     if loop is None or loop.is_closed():
         return
-    _S["worker"] = loop.create_task(_outbox_loop())
+    turn._S["worker"] = loop.create_task(turn._outbox_loop())
 
 
 async def _outbox_loop():
     delay = 1
-    async with httpx.AsyncClient(timeout=40, trust_env=False) as client:
+    async with turn.httpx.AsyncClient(timeout=40, trust_env=False) as client:
         while True:
             try:
-                item = await _poll_outbox(client)
+                item = await turn._poll_outbox(client)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("取出箱失败：%r", exc)
+                turn.logger.warning("取出箱失败：%r", exc)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
                 continue
@@ -906,39 +908,39 @@ async def _outbox_loop():
             if item is None:
                 continue
             try:
-                await _do_outbox(item, client)
+                await turn._do_outbox(item, client)
             except Exception as exc:
-                logger.warning("执行出箱项失败 %r：%r", item.get("id"), exc)
+                turn.logger.warning("执行出箱项失败 %r：%r", item.get("id"), exc)
                 try:
-                    await _receipt(item.get("id"), {"result": "failed", "category": "other"}, client)
+                    await turn._receipt(item.get("id"), {"result": "failed", "category": "other"}, client)
                 except Exception as receipt_exc:
-                    logger.warning("回报出箱失败 %r：%r", item.get("id"), receipt_exc)
+                    turn.logger.warning("回报出箱失败 %r：%r", item.get("id"), receipt_exc)
 
 
 async def _poll_outbox(client=None):
-    core, token = _core()
-    bot = _bot_token()
+    core, token = turn._core()
+    bot = turn._bot_token()
     if not core or not token or not bot:
         await asyncio.sleep(5)
         return None
     if client is None:
-        async with httpx.AsyncClient(timeout=40, trust_env=False) as own:
-            return await _poll_outbox(own)
-    response = await client.get(f"{core}/agent/outbox/{token}", headers={BOT_TOKEN: bot})
+        async with turn.httpx.AsyncClient(timeout=40, trust_env=False) as own:
+            return await turn._poll_outbox(own)
+    response = await client.get(f"{core}/agent/outbox/{token}", headers={turn.BOT_TOKEN: bot})
     response.raise_for_status()
     return response.json()
 
 
 async def _receipt(item_id, result, client=None):
-    core, token = _core()
-    bot = _bot_token()
+    core, token = turn._core()
+    bot = turn._bot_token()
     if not core or not token or not bot or not item_id:
         return
     if client is None:
-        async with httpx.AsyncClient(timeout=5, trust_env=False) as own:
-            return await _receipt(item_id, result, own)
+        async with turn.httpx.AsyncClient(timeout=5, trust_env=False) as own:
+            return await turn._receipt(item_id, result, own)
     response = await client.post(f"{core}/agent/outbox/{token}", timeout=5,
-                                 json={"id": item_id, "result": result}, headers={BOT_TOKEN: bot})
+                                 json={"id": item_id, "result": result}, headers={turn.BOT_TOKEN: bot})
     response.raise_for_status()
 
 
@@ -957,10 +959,10 @@ async def _do_outbox(item, client=None):
     kind = item.get("kind") or {}
     if kind.get("type") == "cancel_turn":
         session = kind.get("session") or ""
-        origin = _origin(session) or {}
+        origin = turn._origin(session) or {}
         session_key = origin.get("session_key")
         source = origin.get("source")
-        runner = _runner()
+        runner = turn._runner()
         if session_key and runner is not None:
             clear = getattr(runner, "_interrupt_and_clear_session", None)
             try:
@@ -973,27 +975,27 @@ async def _do_outbox(item, client=None):
                         invalidation_reason="wonton_chain_stopped",
                     )
                 else:
-                    _release_slot(runner, session_key)
+                    turn._release_slot(runner, session_key)
             except Exception as exc:
                 # 清会话时抛了异常也要把槽放掉；核心不重发 CancelTurn，槽占着就再也轮不到这一会话。
-                logger.warning("停链时清会话失败 %s：%r", session, exc)
+                turn.logger.warning("停链时清会话失败 %s：%r", session, exc)
                 try:
-                    _release_slot(runner, session_key)
+                    turn._release_slot(runner, session_key)
                 except Exception as slot_exc:
-                    logger.warning("停链时放轮次槽也失败 %s：%r", session, slot_exc)
-            await _receipt(item_id, {"result": "sent", "event_id": ""}, client)
+                    turn.logger.warning("停链时放轮次槽也失败 %s：%r", session, slot_exc)
+            await turn._receipt(item_id, {"result": "sent", "event_id": ""}, client)
         else:
-            await _receipt(item_id, {"result": "failed", "category": "other"}, client)
+            await turn._receipt(item_id, {"result": "failed", "category": "other"}, client)
     elif kind.get("type") == "message":
-        event_id, category = await _send(
+        event_id, category = await turn._send(
             kind.get("recipient") or "", kind.get("body") or "", item_id
         )
         if event_id is None:
-            await _receipt(item_id, {"result": "failed", "category": category}, client)
+            await turn._receipt(item_id, {"result": "failed", "category": category}, client)
         else:
-            await _receipt(item_id, {"result": "sent", "event_id": event_id}, client)
+            await turn._receipt(item_id, {"result": "sent", "event_id": event_id}, client)
     else:
-        await _receipt(item_id, {"result": "failed", "category": "other"}, client)
+        await turn._receipt(item_id, {"result": "failed", "category": "other"}, client)
 
 
 def _server():
@@ -1012,8 +1014,8 @@ async def _send(recipient, body, txn_id):
     返回 ``(event_id, category)``；没发成时 event_id 为 None，category 是 ``no_room``（没有已加入的私聊）
     或 ``other``（读账号数据、发送本身失败）。
     """
-    client = _client()
-    server = _server()
+    client = turn._client()
+    server = turn._server()
     if client is None or not server or not recipient:
         return None, "other"
     target = f"@{recipient}:{server}"
@@ -1021,7 +1023,7 @@ async def _send(recipient, body, txn_id):
         direct = await client.get_account_data("m.direct") or {}
         joined = set(await client.get_joined_rooms() or [])
     except Exception as exc:
-        logger.warning("读私聊房间失败：%r", exc)
+        turn.logger.warning("读私聊房间失败：%r", exc)
         return None, "other"
     for room in direct.get(target, []):
         if room in joined:
@@ -1032,14 +1034,14 @@ async def _send(recipient, body, txn_id):
                     room, EventType.ROOM_MESSAGE,
                     {"msgtype": "m.text", "body": body}, txn_id=txn_id), timeout=45)
             except Exception as exc:
-                logger.warning("发私聊失败：%r", exc)
+                turn.logger.warning("发私聊失败：%r", exc)
                 return None, "other"
             return event_id, ""
     return None, "no_room"
 
 
 def _client():
-    runner = _runner()
+    runner = turn._runner()
     if runner is None:
         return None
     try:
@@ -1047,6 +1049,6 @@ def _client():
 
         adapter = runner.adapters.get(Platform.MATRIX)
     except Exception as exc:
-        logger.warning("拿不到 Matrix 适配器：%r", exc)
+        turn.logger.warning("拿不到 Matrix 适配器：%r", exc)
         return None
     return getattr(adapter, "_client", None)
