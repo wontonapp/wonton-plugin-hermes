@@ -128,9 +128,12 @@ def register(ctx):
     from . import commands
     from . import message_batch
     from . import side_chat
+    from . import trace
     from . import turn
 
     turn.register(ctx)
+    # 在 turn 之后：轨迹读 turn 在 pre_llm_call 里记下的这一轮的来源。
+    trace.register(ctx)
     side_chat.register(ctx)
     message_batch.register(ctx)
     commands.register(ctx)

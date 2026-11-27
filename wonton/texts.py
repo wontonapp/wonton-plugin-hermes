@@ -112,3 +112,62 @@ CHAIN_OTHER = {
     "zh-Hant": "核心這次沒收下這一輪。",
     "ja": "コアは今回のターンを受け付けませんでした。",
 }
+
+# 干活轨迹（trace.py）。类别的说法：状态消息的 step、多人房间里清单每项的说明。键是 ACP 的 ToolKind。
+TRACE_KIND = {
+    "read": {"en": "Reading a file", "zh-Hans": "读文件", "zh-Hant": "讀檔案", "ja": "ファイルを読む"},
+    "edit": {"en": "Editing a file", "zh-Hans": "改文件", "zh-Hant": "改檔案", "ja": "ファイルを編集"},
+    "delete": {"en": "Deleting", "zh-Hans": "删除", "zh-Hant": "刪除", "ja": "削除"},
+    "move": {"en": "Moving", "zh-Hans": "移动", "zh-Hant": "移動", "ja": "移動"},
+    "search": {"en": "Searching files", "zh-Hans": "搜索文件", "zh-Hant": "搜尋檔案", "ja": "ファイルを検索"},
+    "execute": {"en": "Running a command", "zh-Hans": "执行命令", "zh-Hant": "執行命令", "ja": "コマンドを実行"},
+    "think": {"en": "Thinking", "zh-Hans": "思考", "zh-Hant": "思考", "ja": "考え中"},
+    "fetch": {"en": "Using the web", "zh-Hans": "上网查", "zh-Hant": "上網查", "ja": "ウェブを参照"},
+    "other": {"en": "Using a tool", "zh-Hans": "调用工具", "zh-Hant": "呼叫工具", "ja": "ツールを使用"},
+}
+
+# 状态消息的 body：不认识这个格式的客户端（Element、旧版 App）只看到这一句。
+TRACE_BODY = {
+    "working": {
+        "en": "{step} (step {n})",
+        "zh-Hans": "{step}（第 {n} 步）",
+        "zh-Hant": "{step}（第 {n} 步）",
+        "ja": "{step}（{n} ステップ目）",
+    },
+    "waiting": {"en": "Waiting for you", "zh-Hans": "等你确认", "zh-Hant": "等你確認", "ja": "確認待ち"},
+    "done": {
+        "en": "Done, steps: {n}",
+        "zh-Hans": "完成，用了 {n} 步",
+        "zh-Hant": "完成，用了 {n} 步",
+        "ja": "完了（{n} ステップ）",
+    },
+    "failed": {
+        "en": "Didn't finish, steps: {n}",
+        "zh-Hans": "没做完，用了 {n} 步",
+        "zh-Hant": "沒做完，用了 {n} 步",
+        "ja": "完了できませんでした（{n} ステップ）",
+    },
+    "cancelled": {"en": "Stopped", "zh-Hans": "打断了", "zh-Hant": "打斷了", "ja": "中断しました"},
+    "uncertain": {
+        "en": "The bot restarted; the result of this run is uncertain",
+        "zh-Hans": "Bot 重启了，这一轮结果不确定",
+        "zh-Hant": "Bot 重新啟動了，這一輪結果不確定",
+        "ja": "ボットが再起動したため、この実行の結果は不明です",
+    },
+}
+
+# 状态消息的 result：失败时的一句话。
+TRACE_RESULT = {
+    "failed": {
+        "en": "This run hit an error",
+        "zh-Hans": "这一轮出错了",
+        "zh-Hant": "這一輪出錯了",
+        "ja": "この実行でエラーが起きました",
+    },
+    "restarted": {
+        "en": "The bot restarted",
+        "zh-Hans": "Bot 重启了",
+        "zh-Hant": "Bot 重新啟動了",
+        "ja": "ボットが再起動しました",
+    },
+}
