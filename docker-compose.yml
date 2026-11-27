@@ -1,7 +1,8 @@
 # Hermes：云吞的默认 Agent。核心镜像带着同一份，核心第一次启动时自动装上；这个仓库让主人卸掉以后还能从商店装回来。
 #
-# Hermes 用自带的 Matrix 平台以 bot 身份登录 Tuwunel；模型用 Hermes 自带的供应商接入，主人在插件网页的
-# Keys 页填 key 或登录订阅、Models 页选模型。不申请 models：不依赖云吞的模型网关，没装网关也照样装、照样用。
+# Hermes 用自带的 Matrix 平台以 bot 身份登录 Tuwunel；模型用 Hermes 自带的供应商接入，主人在 App 原生的模型页里
+# 填 key 或登录订阅、选模型（agent.models 的命令经 Hermes 自己的控制台接口做）。不申请 models：不依赖云吞的模型网关，
+# 没装网关也照样装、照样用。
 # 每个 Bot 一组 init + gateway + web 容器（x-wonton.bots）：Hermes 的 profile 不隔离文件系统，
 # 不同人的 Bot 不能共用一个容器。
 name: hermes
@@ -27,7 +28,7 @@ services:
         cp /seed/skills/wonton-help/SKILL.md /opt/data/skills/wonton-help/ &&
         { test -f /opt/data/config.yaml || cp /seed/config.yaml /opt/data/config.yaml; } &&
         /opt/hermes/.venv/bin/python /seed/init_config.py &&
-        chown -R ${PUID}:${PGID} /opt/data/skills /opt/data/plugins /opt/data/hooks/wonton-language
+        chown -R ${PUID}:${PGID} /opt/data/skills /opt/data/plugins /opt/data/hooks/wonton-language /opt/data/wonton-dashboard-token
     environment:
       # 平台 extra 里的 allow_admin_from 占位符由 init 换成这个值（Hermes 不展开 extra 的 ${VAR}）。
       WONTON_MATRIX_ALLOWED_USERS: ${WONTON_MATRIX_ALLOWED_USERS:?需要主人的 Matrix 用户 ID}
@@ -92,6 +93,11 @@ services:
       init:
         condition: service_completed_successfully
     environment:
+      # 控制台的会话口令从 init 写的文件读（上游的 file: 写法）：模型命令（agent.models）调控制台的写接口要用同一个口令，
+      # 默认的口令每次启动随机生成、只注入网页，别的进程拿不到。
+      HERMES_DASHBOARD_SESSION_TOKEN: file:/opt/data/wonton-dashboard-token
+      # 没选模型时的提示要带这个 Bot 在 App 里的模型页链接。
+      WONTON_BOT_NAME: ${WONTON_BOT_NAME}
       # 镜像启动时把内部用户改成这个 uid/gid，再修正数据目录属主。
       PUID: ${PUID}
       PGID: ${PGID}
@@ -143,6 +149,10 @@ services:
       - ${WONTON_BOT_DATA}:/opt/data
       # wonton__save_file 只从这里取文件：Agent 的数据目录里有密钥。
       - ${WONTON_APP_DATA}/outbox:/opt/data/outbox
+    # 模型命令放在数据目录外的单独目录：不进 Agent 能改的数据目录，脚本所在目录（sys.path 的第一项）里也没有别的模块。
+    configs:
+      - source: agent_models
+        target: /opt/wonton/agent_models.py
     healthcheck:
       # Matrix 连上才算健康：用 Hermes 自己生成的本机 API 密钥查详细状态。
       test:
@@ -213,15 +223,17 @@ configs:
     file: ./wonton/locales/ja.yaml
   init_config:
     file: ./init_config.py
+  agent_models:
+    file: ./agent_models.py
   wonton_help_skill:
     file: ./skills/wonton-help/SKILL.md
   dashboard_proxy:
     file: ./dashboard-nginx.conf
 
 x-wonton:
-  spec: "0.12"
+  spec: "0.17"
   id: com.nousresearch.hermes
-  version: 0.8.2
+  version: 0.9.0
   kind: agent
   title: { zh: AI 管家（Hermes）, en: All-Purpose Bot (Hermes) }
   description:
@@ -238,7 +250,7 @@ x-wonton:
     zh: |
       Nous Research 家的通用 AI 助手：在 App 里和它私聊，它能上网查资料、用你装的应用提供的工具、读你允许它看的文件夹。
 
-      消息走 Matrix 私聊。模型用 Hermes 自带的接入：打开它的网页，在 Keys 页填 AI 服务商的 API key 或登录订阅，再在 Models 页选模型；没选好之前它会告诉你去哪里设，不会偷偷换成别的服务。key 和登录信息存在这个 Bot 自己的数据里。经云吞装卸插件这类操作要你在卡片上确认；Hermes 自带的终端、文件和浏览器工具在它自己的容器里直接运行，能读写这个 Bot 的数据（含密钥）、能联网，碰不到你的共享文件夹和别的插件的数据。
+      消息走 Matrix 私聊。模型在 App 里接：在它的资料页点「模型」，选一家 AI 服务商，填 API key 或登录订阅，再选模型、测一下；没接好之前它会告诉你去哪里接，不会偷偷换成别的服务。key 和登录信息存在这个 Bot 自己的数据里。经云吞装卸插件这类操作要你在卡片上确认；Hermes 自带的终端、文件和浏览器工具在它自己的容器里直接运行，能读写这个 Bot 的数据（含密钥）、能联网，碰不到你的共享文件夹和别的插件的数据。
 
       国内办公 IM 渠道（飞书、钉钉、企业微信、QQ 机器人、个人微信）在插件详情页的「设置」里逐个启用：去对应平台的
       开放平台建一个机器人应用，把应用 ID 和密钥填进来、打开开关。这些聊天只出现在那个 IM 里，不进云吞 App 的聊天页；
@@ -247,24 +259,29 @@ x-wonton:
     en: |
       An all-round AI assistant by Nous Research: chat with it privately in the app, and it can search the web, use the tools your apps provide and read the folders you allow.
 
-      Messages travel in a Matrix chat. It uses Hermes's own model setup: open its web page, add an AI provider's API key or sign in under Keys, then pick a model under Models; until then it tells you where to set it up rather than silently switching services. Keys and sign-ins are stored in this Bot's own data. Actions through Wonton, such as installing plugins, wait for your confirmation card. Hermes's terminal, file and browser tools run directly in its container: they can read and write this Bot's data, including secrets, and access the network, but not your shared folders or other apps' data.
+      Messages travel in a Matrix chat. Models are set up in the app: on its profile, tap Model, choose an AI provider, enter its API key or sign in, then pick a model and test it; until then it tells you where to set it up rather than silently switching services. Keys and sign-ins are stored in this Bot's own data. Actions through Wonton, such as installing plugins, wait for your confirmation card. Hermes's terminal, file and browser tools run directly in its container: they can read and write this Bot's data, including secrets, and access the network, but not your shared folders or other apps' data.
 
       CN office-IM channels (Feishu, DingTalk, WeCom, QQ bot, personal WeChat) are enabled one by one in the plugin's settings: create a bot app on the platform's console, fill in the app ID and secret, and turn the switch on. These chats live only in that IM, not in the Wonton app's chat page; personal WeChat supports direct messages only and needs a one-time scan login from a terminal on the server (steps in the plugin README). Telegram is configured on the Channels page of the Hermes web page and uses Wonton's outbound proxy.
   release_notes:
-    zh: "升级到官方 Hermes v0.23.4：IM 适配器、审批卡片和 MCP 客户端跟着上游更新；回答问题的等待时间保持云吞原来的 1 小时（上游新版默认 90 秒）。"
-    zh-Hant: "升級到官方 Hermes v0.23.4：IM 適配器、審批卡片和 MCP 客戶端跟著上游更新；回答問題的等待時間保持雲吞原來的 1 小時（上游新版預設 90 秒）。"
-    en: "Upgrades to official Hermes v0.23.4: IM adapters, approval cards and the MCP client follow upstream; questions keep Wonton's one-hour wait (upstream's new default is 90 seconds)."
-    ja: "公式 Hermes v0.23.4 に更新：IM アダプター、承認カード、MCP クライアントを上流に追従させました。質問への回答待ちは Wonton 従来の 1 時間のままです（上流の新しい既定は 90 秒）。"
+    zh: "模型改在 App 里接：列出 Hermes 支持的服务商，填 key、登录 Nous、ChatGPT、xAI、MiniMax 订阅，选模型、测一下，都不用再打开 Hermes 的网页。新建的默认助手叫云吞。"
+    zh-Hant: "模型改在 App 裡接：列出 Hermes 支援的服務商，填金鑰、登入 Nous、ChatGPT、xAI、MiniMax 訂閱，選模型、測一下，都不用再打開 Hermes 的網頁。新建的預設助手叫雲吞。"
+    en: "Models are now set up in the app: Hermes's providers are listed, and entering a key, signing in to Nous, ChatGPT, xAI or MiniMax, picking a model and testing it no longer need Hermes's web page. A newly created default assistant is called Wonton."
+    ja: "モデルはアプリで設定するようになりました。Hermes が対応するサービスが一覧され、キーの入力、Nous・ChatGPT・xAI・MiniMax へのログイン、モデルの選択とテストに Hermes の Web ページは不要です。新しく作る既定のアシスタントの名前は Wonton です。"
   agent:
     protocol: matrix
+    # App 原生的模型页经核心执行它（每个 Bot 在自己那组的 gateway 里）。它调的是同一容器里 Hermes 控制台的接口，
+    # 所以要在 gateway 里跑；脚本见 agent_models.py 开头。
+    models:
+      service: gateway
+      command: [/opt/hermes/.venv/bin/python, /opt/wonton/agent_models.py]
+  # 默认助手的名字：建 Bot 时按主人的语言取一个，写进它的 Matrix 资料。
   bot:
-    display_name: { zh: Hermes, en: Hermes }
-  # 原生回环 dashboard 不另建账号；主人会话由核心网关校验，不开放局域网端口。
-  # 打开就落在 Models 页：装好后第一件事是选模型，没有可选的供应商时上游页面会指去 Keys。
+    display_name: { zh: 云吞, zh-Hant: 雲吞, en: Wonton, ja: Wonton }
+  # 原生回环 dashboard 不另建账号；主人会话由核心网关校验，不开放局域网端口。模型不在这里设（见 agent.models），
+  # 网页留给要用 Hermes 控制台其他功能的人。
   webui:
     service: gateway
     port: 8080
-    path: /models
     sso: none
   # nginx 在 gateway 的命名空间监听 8080；入口指向 default Bot 的网络目标服务。
   bots:

@@ -9,13 +9,18 @@
 ## 模型
 
 模型只用 Hermes 自带的供应商接入：插件不申请 `models`，不依赖云吞的模型网关，没装网关、网关坏了都照样
-装、照样用。主人在插件网页（打开即是 Hermes 的 Models 页）的 Keys 页新加一个服务商、填它的 API key 或登录订阅，
-再在 Models 页选主模型；Hermes 把 key 写进这个 Bot 数据目录的 `.env`，模型写回 `config.yaml`。能接哪些服务商、怎么登录以镜像
-对应的上游版本为准（`website/docs/user-guide/configuring-models.md`、`hermes_cli/web_server_oauth.py`）。
+装、照样用。主人在 App 里这个 Bot 的模型页接：列出 Hermes 目录里的服务商（推荐的几家在前），填 API key、用设备码登录订阅
+（Nous Portal、ChatGPT/Codex、xAI Grok、MiniMax），选主模型，再测一下。页面是 App 原生的，数据来自清单
+`agent.models` 声明的命令 `agent_models.py`：核心在这个 Bot 的 gateway 容器里执行它，它调同一容器里 Hermes 控制台的
+接口（口令和控制台读同一个文件，`HERMES_DASHBOARD_SESSION_TOKEN=file:`，由 init 生成）。Hermes 把 key 写进这个 Bot
+数据目录的 `.env`，登录态写进 `auth.json`，模型写回 `config.yaml`；核心和插件都不另存一份。能接哪些服务商、怎么登录以镜像
+对应的上游版本为准；只能在终端登录的（Claude 订阅、Qwen CLI）和要云账号凭据的（Bedrock、Vertex）不列。
+测试用上游辅助调用的同一套客户端真发一条很短的请求，可能计费；主模型失败后上游改走备用时，算测试不通。
 辅助任务用上游默认的 `auto`，跟随主模型。
 
-还没选模型（`config.yaml` 里没有 `model.default`）时，wonton 插件按说话人的语言回一句去插件网页设置，不把上游
-“去终端跑 `hermes model`”的报错发进聊天。key 无效、额度用完这类短报错经语言包改写成指向同一个网页的 Keys 或 Models 页。
+还没选模型（`config.yaml` 里没有 `model.default`）时，wonton 插件按说话人的语言回一句带 App 模型页链接
+（`wonton://bot-models/<插件 ID>/<Bot 名>`）的提示，不把上游“去终端跑 `hermes model`”的报错发进聊天。key 无效、额度用完
+这类短报错经语言包改写成指向 App 里的模型设置。Hermes 的网页照旧能从“应用”里打开，模型也能在那里改，两边读写的是同一份数据。
 
 想用 magpie 这类模型网关，可以把它当自定义的 OpenAI 兼容服务商填进 Hermes；插件没有 `models` 权限，经核心别名
 `models.wonton.internal` 访问网关会被拒，只能用网关自己对外的地址。

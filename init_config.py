@@ -19,15 +19,19 @@
 #    停用（优先于凭据），开关打开撤掉，启用与否由 Hermes 按凭据判定（见 apply 里的第 8 块）。
 # 9) agent.clarify_timeout：上游 v0.23.x 把默认从 1 小时改成 90 秒（按终端里用户就在跟前的场景调），云吞是异步
 #    聊天，老 Bot 缺这项时补包里的 1 小时；主人自己写过的不动（见 apply 里的第 9 块）。
+# 10) 控制台的会话口令（gateway 的 HERMES_DASHBOARD_SESSION_TOKEN=file:… 指向它）：模型命令和控制台读同一份。
+#     没有才生成，已有的不换：init 重跑而 gateway 没重建时，换了口令两边就对不上。
 # 注入值要在已有 Bot 重建时更新，所以在这里处理；其余默认值从包里的 config.yaml 取。
 # `hermes config set` 在这里用不了：它降权运行，而这时数据目录还属于 root。
 import os
+import secrets
 
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import LiteralScalarString
 
 CONFIG_PATH = "/opt/data/config.yaml"
 SEED_PATH = "/seed/config.yaml"
+TOKEN_PATH = "/opt/data/wonton-dashboard-token"
 
 # 国内 IM 渠道（插件设置里每个渠道一个开关，默认关）。config.yaml 的键名是 Hermes 平台 ID。
 _IM_CHANNELS = {
@@ -177,7 +181,22 @@ def apply(config, seed) -> bool:
     return changed
 
 
+def ensure_dashboard_token():
+    """第 10 块：口令文件只给属主读（init 之后的 chown 交给 Bot 的用户）。"""
+    try:
+        with open(TOKEN_PATH, encoding="utf-8") as f:
+            if f.read().strip():
+                return
+    except FileNotFoundError:
+        pass
+    fd = os.open(TOKEN_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(secrets.token_urlsafe(32) + "\n")
+    os.replace(TOKEN_PATH + ".tmp", TOKEN_PATH)
+
+
 def main():
+    ensure_dashboard_token()
     yaml = YAML()
     with open(CONFIG_PATH) as f:
         config = yaml.load(f) or {}
