@@ -357,14 +357,15 @@ def main():
 
     # 标题是会话表里的唯一键：时间戳 + 随机串。每次重试都换一个新标题，同一个标题的第二次一定撞。
     created = None
-    for attempt in range(3):
+    # 共享机负载高时 state.db 的写锁会卡 90 秒以上：给足超时、多重试，别把 500 当失败。
+    for attempt in range(5):
         title = f"mirage pilot {int(time.time())}-{secrets.token_hex(3)}-{attempt}"
         try:
-            created = http("POST", "/api/sessions", {"title": title})
+            created = http("POST", "/api/sessions", {"title": title}, timeout=90)
             break
         except Exception as exc:  # noqa: BLE001
             log("session-create-retry", attempt=attempt, error=repr(exc))
-            time.sleep(2)
+            time.sleep(5 * (attempt + 1))
     session_id = ((created or {}).get("session") or {}).get("id") or (created or {}).get("id")
     if not session_id:
         # 建不出来就借一个已有的会话，比编一个不存在的 id 好（否则 chat 全 404）。
