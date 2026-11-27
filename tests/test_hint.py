@@ -105,14 +105,14 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
         self.fake.people[OWNER] = ["en"]
         reply = (await self.hint())["reply"]
         self.assertEqual(reply, texts.NO_MODEL["en"])
-        self.assertIn("Apps → All-Purpose Bot (Hermes)", reply)
+        self.assertIn("Apps → Hermes", reply)
         self.assertNotIn("\n", reply)
 
     async def test_simplified_chinese(self):
         self.fake.people[OWNER] = ["zh-Hans", "en"]
         reply = (await self.hint())["reply"]
         self.assertEqual(reply, texts.NO_MODEL["zh-Hans"])
-        self.assertIn("应用 → AI 管家（Hermes）", reply)
+        self.assertIn("应用 → Hermes", reply)
         self.assertNotIn("\n", reply)
 
     async def test_traditional_from_region_tag(self):
@@ -125,7 +125,7 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
         self.fake.people[OWNER] = ["ja-JP", "en"]
         reply = (await self.hint())["reply"]
         self.assertEqual(reply, texts.NO_MODEL["ja"])
-        self.assertIn("アプリ → All-Purpose Bot (Hermes)", reply)
+        self.assertIn("アプリ → Hermes", reply)
 
     async def test_unsupported_language_falls_back_to_english(self):
         self.fake.people[OWNER] = ["fr-FR"]
