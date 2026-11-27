@@ -1,4 +1,4 @@
-"""干活轨迹：一轮里每调一次工具，聊天里的状态消息就多一项（ADR-0128，格式见插件规范的“Agent 状态消息”）。
+"""干活轨迹：一轮里每调一次工具，聊天里的状态消息就多一项（格式见插件规范“Matrix 上的约定”的“进度”）。
 
 只看不改：挂的都是上游的观察钩子，返回 None，不碰工具的参数和结果，不往上下文里加东西，不调模型。
 
@@ -10,7 +10,7 @@
 - ``kind``、``title`` 用上游 ACP 适配器同一套函数算（``acp_adapter.tools.get_tool_kind``、
   ``agent.display.build_tool_preview``），再过一遍上游日志的脱敏（``agent.redact.redact_sensitive_text``）；
   这几个不是插件接口，``tests/hermes/test_trace_upstream.py`` 钉住它们。私聊里 ``title`` 是一行预览，
-  多人房间里只写类别（ADR-0128 第 3 节）。
+  多人房间里只写类别：家庭群里别人看不到你让 Bot 读了哪个文件、跑了什么命令。
 - 只记 Matrix 来的、核心准了的一轮：来源取 ``turn`` 记下的这一轮（房间、话题、请求事件、说话人），网页控制台、
   定时任务和委派出去的子代理（会话号对不上）都不记。
 - 还没结束的状态消息记在 ``$HERMES_HOME/wonton-trace-open.json``：Bot 重启后，网关第一次收到消息时把它们
@@ -42,7 +42,8 @@ TRACE_FIELD = "app.wonton.trace"
 MAX_CALLS = 30
 MAX_TITLE = 120
 PREVIEW_LEN = 80
-# 只有清单变了的编辑间隔和一轮的编辑上限（ADR-0082 第 2 节）。
+# 只有清单变了的编辑间隔和一轮的编辑上限：每次编辑都是房间里的一个事件，别的客户端也要同步它们，
+# 编得太勤会刷满房间历史；上限里留一次给结束。
 EDIT_INTERVAL = 3.0
 MAX_EDITS = 60
 OPEN_FILE = "wonton-trace-open.json"

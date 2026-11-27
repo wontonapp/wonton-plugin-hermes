@@ -113,7 +113,7 @@ CHAIN_OTHER = {
     "ja": "コアは今回のターンを受け付けませんでした。",
 }
 
-# 干活轨迹（trace.py，ADR-0128）。类别的说法：状态消息的 step、多人房间里清单每项的说明。键是 ACP 的 ToolKind。
+# 干活轨迹（trace.py）。类别的说法：状态消息的 step、多人房间里清单每项的说明。键是 ACP 的 ToolKind。
 TRACE_KIND = {
     "read": {"en": "Reading a file", "zh-Hans": "读文件", "zh-Hant": "讀檔案", "ja": "ファイルを読む"},
     "edit": {"en": "Editing a file", "zh-Hans": "改文件", "zh-Hant": "改檔案", "ja": "ファイルを編集"},
