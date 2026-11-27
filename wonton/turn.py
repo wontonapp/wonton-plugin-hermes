@@ -49,11 +49,6 @@ logger = logging.getLogger(__name__)
 
 turn = sys.modules[__name__]
 
-try:
-    import gateway.session_context as _session_context
-except Exception:  # 上游老版本没有它：只认环境变量
-    _session_context = None
-
 ON_BEHALF_OF = "X-Wonton-On-Behalf-Of"
 SESSION = "wonton-session"
 BOT_TOKEN = "X-Wonton-Bot-Token"
@@ -102,51 +97,6 @@ def register(ctx):
     ctx.register_hook("pre_llm_call", turn.pre_llm_call)
     ctx.register_hook("on_session_end", turn.on_session_end)
     ctx.register_hook("on_session_reset", turn.on_session_reset)
-
-
-def _core():
-    """核心地址和这个插件的总线令牌：MCP 地址是 ``<核心>/mcp/<令牌>``。拿不到时 None。"""
-    url = os.environ.get("WONTON_MCP_URL", "")
-    head, sep, token = url.rpartition("/mcp/")
-    if not sep or not head or not token:
-        return None, None
-    return head.rstrip("/"), token
-
-
-def _bot_token():
-    return os.environ.get("MATRIX_ACCESS_TOKEN", "")
-
-
-def _is_matrix(platform):
-    return str(getattr(platform, "value", platform) or "").lower() == "matrix"
-
-
-def _session_var(name):
-    """会话环境里的一项。
-
-    上游把它存在 contextvar 里，网关按这一轮在 Agent 线程的 context 里绑定，MCP 的工具线程拷着那份
-    context 跑，所以看到的是这一轮自己的值。这一份 context 里从没绑过时（``_UNSET``），上游回落到
-    ``os.environ`` 的旧值；清掉是绑成空串，这时拿到的是空串，不再回落。
-    """
-    context = sys.modules.get("gateway.session_context") or _session_context
-    get = getattr(context, "get_session_env", None)
-    return get(name) if get is not None else os.environ.get(name, "")
-
-
-def _session_id():
-    return turn._session_var("HERMES_SESSION_ID")
-
-
-def _runner():
-    if turn._S["runner"] is not None:
-        return turn._S["runner"]
-    try:
-        from gateway.run import _gateway_runner_ref
-
-        turn._S["runner"] = _gateway_runner_ref()
-    except Exception as exc:
-        turn.logger.warning("拿不到网关：%r", exc)
-    return turn._S["runner"]
 
 
 def pre_gateway_dispatch(event=None, gateway=None, session_store=None, **_):
@@ -1052,3 +1002,14 @@ def _client():
         turn.logger.warning("拿不到 Matrix 适配器：%r", exc)
         return None
     return getattr(adapter, "_client", None)
+
+
+# 子模块经 ``turn.X`` 取共享名；这里把原来的名字导回来，对外的导入一个不少。
+from .turn_env import (  # noqa: E402
+    _bot_token,
+    _core,
+    _is_matrix,
+    _runner,
+    _session_id,
+    _session_var,
+)

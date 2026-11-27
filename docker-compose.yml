@@ -55,6 +55,8 @@ services:
         target: /seed/wonton/commands.py
       - source: wonton_turn
         target: /seed/wonton/turn.py
+      - source: wonton_turn_env
+        target: /seed/wonton/turn_env.py
       - source: wonton_trace
         target: /seed/wonton/trace.py
       - source: wonton_pages
@@ -191,6 +193,8 @@ configs:
     file: ./wonton/commands.py
   wonton_turn:
     file: ./wonton/turn.py
+  wonton_turn_env:
+    file: ./wonton/turn_env.py
   wonton_trace:
     file: ./wonton/trace.py
   wonton_pages:
