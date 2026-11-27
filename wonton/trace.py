@@ -75,7 +75,8 @@ class Run:
         self.result = None     # failed 时的一句话（按语言的键）
         self.event_id = None
         self.edits = 0
-        self.dirty = True
+        # 第一项记进清单才算有东西可发：发送协程可能比第一个 pre_tool_call 先跑起来。
+        self.dirty = False
         self.wake = None       # asyncio.Event，在循环上建
 
 
@@ -128,7 +129,9 @@ def pre_tool_call(tool_name="", args=None, session_id="", tool_call_id="", **_):
         run.calls.append({"id": call_id, "kind": kind, "title": title, "status": "in_progress"})
         del run.calls[:-MAX_CALLS]
         run.dirty = True
-    _poke(run, urgent=False)
+        first = run.steps == 1
+    # 第一项立刻发出状态消息；之后只是清单变了，等它自己隔 3 秒看一次。
+    _poke(run, urgent=first)
     return None
 
 

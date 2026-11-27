@@ -127,6 +127,18 @@ class Case(unittest.IsolatedAsyncioTestCase):
         # 结束了就从重启收尾的记录里删掉。
         self.assertFalse(Path(self.home.name, trace.OPEN_FILE).exists())
 
+    async def test_the_first_message_already_lists_the_first_call(self):
+        # 钩子在工具线程里跑：发送协程可能在第一项记进清单之前就开始了，不能先发一条“第 0 步”。
+        self.granted()
+        trace._run_for(SID)
+        await self.settle()
+        self.assertEqual(self.adapter.sent, [])
+        trace.pre_tool_call(tool_name="terminal", args={"command": "ls -la"}, session_id=SID, tool_call_id="c1")
+        await self.settle()
+        self.assertEqual(len(self.adapter.sent), 1)
+        self.assertEqual(self.adapter.sent[0][1]["org.fluxchat.agent"]["steps"], 1)
+        trace.on_session_end(session_id=SID, completed=True)
+
     async def test_a_group_room_only_names_the_kind(self):
         self.granted(chat_type="group")
         trace.pre_tool_call(tool_name="terminal", args={"command": "cat ~/secret.txt"}, session_id=SID,
