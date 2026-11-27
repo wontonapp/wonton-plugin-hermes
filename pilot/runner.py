@@ -74,9 +74,10 @@ class AskHandler(BaseHTTPRequestHandler):
         if command == "mv" and any("/tmp/hermes-snap" in str(a) for a in argv):
             self._answer(200, {"decision": "allow", "scope": "session"})
             return
-        if command == "curl":
-            # 两个 curl 用例靠 --max-time 区分：20 秒的故意拖 8 秒等插件超时；5 秒的立刻答。
-            if "20" in [str(a) for a in argv]:
+        if command in ("curl", "wget"):
+            # 允许+session 之后同命令不再问，所以超时用例换 wget（deny+session 不会记住，还会问）。
+            # 用 -T 20 当“慢探针”标记：故意拖 8 秒，等插件 5 秒超时。
+            if command == "wget" and "20" in [str(a) for a in argv]:
                 log("ask-slow", command=command, seconds=8)
                 time.sleep(8)
                 try:
@@ -335,9 +336,9 @@ CASES = [
         [1, 1],  # 观察：deny+session 下一条同规则还会问（允许+session 不会），见 result
     ),
     (
-        "ask-timeout-curl",
-        "只执行：curl -s -S -o /dev/null -w '%{http_code}' --max-time 20 https://example.com/。"
-        "把终端工具返回的原文贴出来，不要解释。",
+        "ask-timeout-wget",
+        # curl 上面已经 allow+session，这里换 wget；-T 20 让假收件箱睡 8 秒，插件 5 秒超时。
+        "只执行：wget -q -O /dev/null -T 20 https://example.com/。把终端工具返回的原文贴出来，不要解释。",
         ("Permission denied", "policy denied"),
         [1],
     ),
