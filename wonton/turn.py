@@ -706,6 +706,11 @@ def _chain_start(body):
         logger.warning("报链开始失败，下一次模型调用再报：%r", exc)
         return "retry", {}, ""
     detail = response.headers.get("X-Wonton-Detail", "")
+    # HTTP 头的字节按 latin-1 落成 str，核心写的是 UTF-8：照原样拼给人看是乱码，收回字节再按 UTF-8 解。
+    try:
+        detail = detail.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
     if response.is_success:
         return "grant", {}, detail
     try:
