@@ -527,13 +527,16 @@ class TurnCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_unknown_refusal_type_keeps_the_cores_words(self):
         # 会话挂在别的链上时核心回的是 other，分类只在头里；说不清就照抄它的说明，不猜类别。
-        self.answer = lambda _body: Response({"type": "other"}, 400, "会话 s-1 已登记在别的链上")
+        # 头在 wire 上是 latin-1；这里照 httpx 取回来的样子给，验证插件自己解码。
+        self.answer = lambda _body: Response(
+            {"type": "other"}, 400, "会话 s-1 已登记在别的链上".encode().decode("latin-1")
+        )
         block, _ = await self.turn()
         self.assertEqual(block["message"], turn.CHAIN_OTHER["zh-Hans"] + "\n\n会话 s-1 已登记在别的链上")
 
     async def test_a_permission_denial_carries_the_cores_reason(self):
         self.answer = lambda _body: Response(
-            {"type": "permission_denied"}, 403, "说话人不是这个 Bot 听的人"
+            {"type": "permission_denied"}, 403, "说话人不是这个 Bot 听的人".encode().decode("latin-1")
         )
         block, _ = await self.turn()
         self.assertEqual(
