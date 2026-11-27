@@ -55,20 +55,6 @@ services:
         target: /seed/wonton/commands.py
       - source: wonton_turn
         target: /seed/wonton/turn.py
-      - source: wonton_turn_env
-        target: /seed/wonton/turn_env.py
-      - source: wonton_turn_identity
-        target: /seed/wonton/turn_identity.py
-      - source: wonton_turn_headers
-        target: /seed/wonton/turn_headers.py
-      - source: wonton_turn_listing
-        target: /seed/wonton/turn_listing.py
-      - source: wonton_turn_chain
-        target: /seed/wonton/turn_chain.py
-      - source: wonton_turn_outbox
-        target: /seed/wonton/turn_outbox.py
-      - source: wonton_trace
-        target: /seed/wonton/trace.py
       - source: wonton_pages
         target: /seed/wonton/pages.py
       - source: wonton_dashboard_api
@@ -203,20 +189,6 @@ configs:
     file: ./wonton/commands.py
   wonton_turn:
     file: ./wonton/turn.py
-  wonton_turn_env:
-    file: ./wonton/turn_env.py
-  wonton_turn_identity:
-    file: ./wonton/turn_identity.py
-  wonton_turn_headers:
-    file: ./wonton/turn_headers.py
-  wonton_turn_listing:
-    file: ./wonton/turn_listing.py
-  wonton_turn_chain:
-    file: ./wonton/turn_chain.py
-  wonton_turn_outbox:
-    file: ./wonton/turn_outbox.py
-  wonton_trace:
-    file: ./wonton/trace.py
   wonton_pages:
     file: ./wonton/pages.py
   wonton_dashboard_api:
