@@ -59,6 +59,8 @@ services:
         target: /seed/wonton/turn_env.py
       - source: wonton_turn_identity
         target: /seed/wonton/turn_identity.py
+      - source: wonton_turn_headers
+        target: /seed/wonton/turn_headers.py
       - source: wonton_trace
         target: /seed/wonton/trace.py
       - source: wonton_pages
@@ -199,6 +201,8 @@ configs:
     file: ./wonton/turn_env.py
   wonton_turn_identity:
     file: ./wonton/turn_identity.py
+  wonton_turn_headers:
+    file: ./wonton/turn_headers.py
   wonton_trace:
     file: ./wonton/trace.py
   wonton_pages:
