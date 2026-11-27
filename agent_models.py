@@ -25,8 +25,8 @@ HTTP_TIMEOUT = 25
 TEST_TIMEOUT = 45
 
 # 推荐的几家（排前面，其余进“更多”），按这个顺序。挑法：国内能直接买到、或一个账号就能用很多模型的；订阅登录
-# 里 ChatGPT 用的人最多。都要是上游目录里有的，没有的跳过。
-RECOMMENDED = ("deepseek", "openrouter", "openai-codex", "zai", "anthropic", "gemini")
+# 里 ChatGPT 用的人最多，Nous 是 Hermes 上游自家的。都要是上游目录里有的，没有的跳过。
+RECOMMENDED = ("deepseek", "openrouter", "openai-codex", "nous", "zai", "anthropic", "gemini")
 # key 的固定开头，App 据此认出剪贴板里刚复制的 key。只写服务商文档里固定的。
 KEY_PREFIXES = {
     "openrouter": "sk-or-", "anthropic": "sk-ant-", "openai-api": "sk-", "deepseek": "sk-",
