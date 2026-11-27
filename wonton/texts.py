@@ -1,18 +1,18 @@
 """给主人的提示和旁聊发回主时间线的文字，四种语言各一条。
 
-入口照 App 里实际显示的写：「应用 → <插件标题>」打开 Hermes 的网页，Keys、Models 是网页侧栏的名字。清单的标题只有中文和
-英文，繁中界面显示简体标题，日文界面显示英文标题；Hermes 网页默认英文，所以页名都写英文。和清单的 title 一起改。
+入口照 App 里实际显示的写：「应用 → <插件标题>」打开 Hermes 的网页，Keys、Models 是网页侧栏的名字。清单的标题是原名
+Hermes，各语言一样；Hermes 网页默认英文，所以页名都写英文。和清单的 title 一起改。
 
 旁聊的引号沿用 ACP 桥的话题文字（四种语言都用「」，见 wonton-acp-bridge 的 locales/*/topics.ftl）。
 """
 NO_MODEL = {
-    "en": "No model is set up yet: open Apps → All-Purpose Bot (Hermes), add an AI provider under Keys (fill in its "
+    "en": "No model is set up yet: open Apps → Hermes, add an AI provider under Keys (fill in its "
     "API key or sign in), pick a model under Models, then message me again.",
-    "zh-Hans": "还没有设置模型：请打开「应用 → AI 管家（Hermes）」，在 Keys 页新加一个模型服务商、填它的 API key 或登录订阅，"
+    "zh-Hans": "还没有设置模型：请打开「应用 → Hermes」，在 Keys 页新加一个模型服务商、填它的 API key 或登录订阅，"
     "再在 Models 页选一个模型，然后再给我发消息。",
-    "zh-Hant": "還沒有設定模型：請打開「應用程式 → AI 管家（Hermes）」，在 Keys 頁新增一個模型供應商、填入它的 API 金鑰或登入訂閱，"
+    "zh-Hant": "還沒有設定模型：請打開「應用程式 → Hermes」，在 Keys 頁新增一個模型供應商、填入它的 API 金鑰或登入訂閱，"
     "再在 Models 頁選一個模型，然後再傳訊息給我。",
-    "ja": "モデルがまだ設定されていません。「アプリ → All-Purpose Bot (Hermes)」を開き、Keys で AI サービスを新しく追加し"
+    "ja": "モデルがまだ設定されていません。「アプリ → Hermes」を開き、Keys で AI サービスを新しく追加し"
     "（API キーを入力するかサブスクリプションでログイン）、Models でモデルを選んでから、もう一度送ってください。",
 }
 

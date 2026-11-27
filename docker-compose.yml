@@ -219,11 +219,12 @@ configs:
     file: ./dashboard-nginx.conf
 
 x-wonton:
-  spec: "0.12"
+  spec: "0.17"
   id: com.nousresearch.hermes
-  version: 0.8.2
+  version: 0.8.3
   kind: agent
-  title: { zh: AI 管家（Hermes）, en: All-Purpose Bot (Hermes) }
+  title: { en: "Hermes" }
+  subtitle: { zh: "AI 管家", en: "All-Purpose Bot" }
   description:
     zh: 像住在家里的万能管家：在 App 里和它私聊，它能上网查资料、用你装的应用提供的工具、读你允许它看的文件夹。云吞默认就带它，也能接到 Telegram、飞书、钉钉、企业微信、QQ 和个人微信上聊。
     en: "Like an all-round butler at home: chat with it privately in the app and it searches the web, uses the tools your apps provide and reads the folders you allow. It comes with Wonton by default and can also chat with you on Telegram, Feishu, DingTalk, WeCom, QQ or personal WeChat."
@@ -250,11 +251,7 @@ x-wonton:
       Messages travel in a Matrix chat. It uses Hermes's own model setup: open its web page, add an AI provider's API key or sign in under Keys, then pick a model under Models; until then it tells you where to set it up rather than silently switching services. Keys and sign-ins are stored in this Bot's own data. Actions through Wonton, such as installing plugins, wait for your confirmation card. Hermes's terminal, file and browser tools run directly in its container: they can read and write this Bot's data, including secrets, and access the network, but not your shared folders or other apps' data.
 
       CN office-IM channels (Feishu, DingTalk, WeCom, QQ bot, personal WeChat) are enabled one by one in the plugin's settings: create a bot app on the platform's console, fill in the app ID and secret, and turn the switch on. These chats live only in that IM, not in the Wonton app's chat page; personal WeChat supports direct messages only and needs a one-time scan login from a terminal on the server (steps in the plugin README). Telegram is configured on the Channels page of the Hermes web page and uses Wonton's outbound proxy.
-  release_notes:
-    zh: "升级到官方 Hermes v0.23.4：IM 适配器、审批卡片和 MCP 客户端跟着上游更新；回答问题的等待时间保持云吞原来的 1 小时（上游新版默认 90 秒）。"
-    zh-Hant: "升級到官方 Hermes v0.23.4：IM 適配器、審批卡片和 MCP 客戶端跟著上游更新；回答問題的等待時間保持雲吞原來的 1 小時（上游新版預設 90 秒）。"
-    en: "Upgrades to official Hermes v0.23.4: IM adapters, approval cards and the MCP client follow upstream; questions keep Wonton's one-hour wait (upstream's new default is 90 seconds)."
-    ja: "公式 Hermes v0.23.4 に更新：IM アダプター、承認カード、MCP クライアントを上流に追従させました。質問への回答待ちは Wonton 従来の 1 時間のままです（上流の新しい既定は 90 秒）。"
+  release_notes: { zh: "应用名改回原名 Hermes，用途“AI 管家”放到名字下面。", en: "The app now shows its own name, Hermes, with \"All-Purpose Bot\" underneath." }
   agent:
     protocol: matrix
   bot:
