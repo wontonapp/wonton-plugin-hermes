@@ -63,6 +63,8 @@ services:
         target: /seed/wonton/turn_headers.py
       - source: wonton_turn_listing
         target: /seed/wonton/turn_listing.py
+      - source: wonton_turn_chain
+        target: /seed/wonton/turn_chain.py
       - source: wonton_trace
         target: /seed/wonton/trace.py
       - source: wonton_pages
@@ -207,6 +209,8 @@ configs:
     file: ./wonton/turn_headers.py
   wonton_turn_listing:
     file: ./wonton/turn_listing.py
+  wonton_turn_chain:
+    file: ./wonton/turn_chain.py
   wonton_trace:
     file: ./wonton/trace.py
   wonton_pages:
