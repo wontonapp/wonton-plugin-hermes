@@ -29,6 +29,11 @@ from wonton import texts  # noqa: E402
 OWNER = "@owner:example.org"
 
 
+def expected(lang):
+    """提示指向的是这个 Bot（compose 注入的 Bot 名）在 App 里的模型页。"""
+    return texts.NO_MODEL[lang].format(link="wonton://bot-models/com.nousresearch.hermes/alice-helper")
+
+
 class Fake:
     def __init__(self):
         self.people = {OWNER: ["en"]}
@@ -91,6 +96,7 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
         self.vars = {
             "WONTON_MCP_URL": f"{base}/mcp/token",
             "WONTON_OWNER_NAME": "owner",
+            "WONTON_BOT_NAME": "alice-helper",
         }
         patch = mock.patch.dict(os.environ, self.vars)
         patch.start()
@@ -104,48 +110,44 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
     async def test_english_person_gets_english_only(self):
         self.fake.people[OWNER] = ["en"]
         reply = (await self.hint())["reply"]
-        self.assertEqual(reply, texts.NO_MODEL["en"])
-        self.assertIn("Apps → All-Purpose Bot (Hermes)", reply)
+        self.assertEqual(reply, expected("en"))
         self.assertNotIn("\n", reply)
 
     async def test_simplified_chinese(self):
         self.fake.people[OWNER] = ["zh-Hans", "en"]
         reply = (await self.hint())["reply"]
-        self.assertEqual(reply, texts.NO_MODEL["zh-Hans"])
-        self.assertIn("应用 → AI 管家（Hermes）", reply)
+        self.assertEqual(reply, expected("zh-Hans"))
         self.assertNotIn("\n", reply)
 
     async def test_traditional_from_region_tag(self):
         self.fake.people[OWNER] = ["zh-TW"]
         reply = (await self.hint())["reply"]
-        self.assertEqual(reply, texts.NO_MODEL["zh-Hant"])
-        self.assertIn("應用程式", reply)
+        self.assertEqual(reply, expected("zh-Hant"))
 
     async def test_japanese(self):
         self.fake.people[OWNER] = ["ja-JP", "en"]
         reply = (await self.hint())["reply"]
-        self.assertEqual(reply, texts.NO_MODEL["ja"])
-        self.assertIn("アプリ → All-Purpose Bot (Hermes)", reply)
+        self.assertEqual(reply, expected("ja"))
 
     async def test_unsupported_language_falls_back_to_english(self):
         self.fake.people[OWNER] = ["fr-FR"]
-        self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
+        self.assertEqual((await self.hint())["reply"], expected("en"))
 
     async def test_family_without_record_uses_owner_language(self):
         self.fake.people[OWNER] = ["zh-Hant"]
         reply = (await self.hint(user="@alice:example.org"))["reply"]
-        self.assertEqual(reply, texts.NO_MODEL["zh-Hant"])
+        self.assertEqual(reply, expected("zh-Hant"))
         self.assertEqual(self.fake.calls, [{"user_id": "@alice:example.org"}, {}])
 
     async def test_owner_without_record_asks_once_and_speaks_english(self):
         reply = (await self.hint())["reply"]
-        self.assertEqual(reply, texts.NO_MODEL["en"])
+        self.assertEqual(reply, expected("en"))
         self.assertEqual(self.fake.calls, [{"user_id": OWNER}])
 
     async def test_non_matrix_sender_uses_owner_language(self):
         self.fake.people[OWNER] = ["ja"]
         reply = (await self.hint(user="12345", platform="telegram"))["reply"]
-        self.assertEqual(reply, texts.NO_MODEL["ja"])
+        self.assertEqual(reply, expected("ja"))
         self.assertEqual(self.fake.calls, [{}])
 
     async def test_chosen_model_is_not_blocked(self):
@@ -167,7 +169,7 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
             with self.subTest(model=model), mock.patch.object(
                 config, "load_config_readonly", return_value={"model": model}
             ):
-                self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
+                self.assertEqual((await self.hint())["reply"], expected("en"))
 
     async def test_unexpanded_provider_address_still_prompts(self):
         # 只把模型改成真值、选中的服务商地址还是占位符：提示照出，请求才不会打到字面地址。
@@ -176,14 +178,14 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
             "providers": {"magpie": {"api": "${WONTON_MODEL_BASE_URL}"}},
         }
         with mock.patch.object(config, "load_config_readonly", return_value=config_with):
-            self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
+            self.assertEqual((await self.hint())["reply"], expected("en"))
         config_with["providers"]["magpie"]["api"] = "http://magpie.internal/v1"
         with mock.patch.object(config, "load_config_readonly", return_value=config_with):
             self.assertIsNone(await self.hint())
 
     async def test_provider_without_model_still_prompts(self):
         with mock.patch.object(config, "load_config_readonly", return_value={"model": {"provider": "openrouter"}}):
-            self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
+            self.assertEqual((await self.hint())["reply"], expected("en"))
 
     async def test_unreadable_config_is_left_to_hermes(self):
         with mock.patch.object(config, "load_config_readonly", side_effect=OSError("boom")):
@@ -197,12 +199,12 @@ class HintCase(unittest.IsolatedAsyncioTestCase):
     async def test_language_is_cached_per_person(self):
         self.fake.people[OWNER] = ["ja"]
         for _ in range(3):
-            self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["ja"])
+            self.assertEqual((await self.hint())["reply"], expected("ja"))
         self.assertEqual(len(self.fake.calls), 1)
 
     async def test_core_mcp_unreachable_falls_back_to_english(self):
         os.environ["WONTON_MCP_URL"] = "http://127.0.0.1:1/mcp/token"
-        self.assertEqual((await self.hint())["reply"], texts.NO_MODEL["en"])
+        self.assertEqual((await self.hint())["reply"], expected("en"))
 
     def test_tags_map_to_supported_languages(self):
         self.assertEqual(locale.choose(["zh-HK"]), "zh-Hant")

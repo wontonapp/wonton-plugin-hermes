@@ -1,8 +1,8 @@
 # Wonton 给 Hermes 的初始配置：首次启动时由 init 服务写成数据目录里的 config.yaml，之后不覆盖
 # （Hermes 自己也会改写它，比如 /model）。
 #
-# 不写 model：模型用 Hermes 自带的供应商接入，主人在插件网页的 Keys 页填 API key 或登录订阅、
-# 在 Models 页选模型，Hermes 自己写回这份配置。没选模型时 wonton 插件回一句去哪里设，不调模型。
+# 不写 model：模型用 Hermes 自带的供应商接入，主人在 App 的模型页填 API key 或登录订阅、选模型（经 agent_models.py
+# 调 Hermes 控制台的接口），Hermes 自己写回这份配置。没选模型时 wonton 插件回一句去哪里设，不调模型。
 # 辅助任务（压缩、视觉、审批守卫等）用上游默认的 auto：跟随主模型，只走主人配了的 fallback，不猜别的服务商。
 
 # Matrix 的行为设置（身份和令牌由核心经环境变量注入）。只收发消息：不加处理中的表情回应、
@@ -79,8 +79,8 @@ approvals:
        absolute paths elsewhere are outside).
     Everything not listed here follows the base rules above.
 
-# Wonton 的 Hermes 插件（包里的 wonton/，init 服务放进数据目录）：还没选模型时直接告诉主人去插件网页的 Keys 和
-# Models 页设置，不把上游“去终端跑 hermes model”的报错发进聊天。
+# Wonton 的 Hermes 插件（包里的 wonton/，init 服务放进数据目录）：还没选模型时直接给主人 App 里模型页的链接，
+# 不把上游“去终端跑 hermes model”的报错发进聊天。
 plugins:
   enabled: [wonton]
 

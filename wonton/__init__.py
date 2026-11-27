@@ -1,10 +1,10 @@
 """Wonton 给 Hermes 的钩子。
 
-还没选模型时（config.yaml 里没有 model.default，和上游 /health/detailed 的 model 检查同一判据），直接回一句去插件网页的
-Keys、Models 页设置，不调模型。不拦的话，上游的报错叫主人去终端跑 `hermes model`，云吞里没有这个终端。
+还没选模型时（config.yaml 里没有 model.default，和上游 /health/detailed 的 model 检查同一判据），直接回一句带 App 里
+这个 Bot 模型页链接的提示，不调模型。不拦的话，上游的报错叫主人去终端跑 `hermes model`，云吞里没有这个终端。
 提示按说话人自己的语言写（核心按人记着 App 的语言），只有一种，不把几种语言拼在一起。
-每条消息读一次配置：主人在网页里选好模型，下一条消息就照常回答，不用重启。选了模型但 key 无效、服务商出错的，
-交给 Hermes 照常处理，它的短报错经 locales/ 改写成指向同一个网页。
+每条消息读一次配置：主人在 App 里选好模型，下一条消息就照常回答，不用重启。选了模型但 key 无效、服务商出错的，
+交给 Hermes 照常处理，它的短报错经 locales/ 改写成指向 App 里的模型设置。
 
 每轮带上收发文件的办法。收文件：主人用 App 发的文件是正文里的 wonton://file/<编号>，Hermes 只看到文字；PDF 这类
 wonton__view_file 读不了时，模型会让主人「作为附件再发一次」，主人照做还是一样，所以要它照实说读不了。存文件：存进共享文件夹后
@@ -21,12 +21,15 @@ wonton__view_file 读不了时，模型会让主人「作为附件再发一次�
 """
 
 import logging
+import os
 from pathlib import Path
 
 from .locale import language
 from .texts import NO_MODEL
 
 logger = logging.getLogger(__name__)
+
+PLUGIN_ID = "com.nousresearch.hermes"
 
 SEND_FILES = (
     "发给主人的文件来自工具结果里的编号时（「文件 …，编号 …」）：调 wonton__share_file，把返回的 wonton://file/ 链接原样放进回复，"
@@ -67,7 +70,12 @@ async def missing_model_hint(text="", source=None, **_):
     source = source or {}
     user = source.get("user_id")
     sender = user if source.get("platform") == "matrix" and isinstance(user, str) and user.startswith("@") else None
-    return {"action": "handled", "reply": NO_MODEL[await language(sender)]}
+    return {"action": "handled", "reply": NO_MODEL[await language(sender)].format(link=model_page_link())}
+
+
+def model_page_link() -> str:
+    """App 里这个 Bot 的模型页（插件规范“模型接入”的链接）。Bot 名由 compose 注入，没有就是部署错了，照实报错。"""
+    return f"wonton://bot-models/{PLUGIN_ID}/{os.environ['WONTON_BOT_NAME']}"
 
 
 def _model_configured() -> bool:
